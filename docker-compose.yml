@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: crypto_algo
+      POSTGRES_USER: crypto
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-crypto}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crypto -d crypto_algo"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-crypto}
+      JWT_SECRET: ${JWT_SECRET:?set in .env}
+      MASTER_KEY: ${MASTER_KEY:?set in .env}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set in .env}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@platform.local}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:?set in .env}
+      STRATEGY_ENGINE_URL: http://strategy-engine:8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  strategy-engine:
+    build: ./strategy-engine
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set in .env}
+      BACKEND_URL: http://backend:8080
+    depends_on:
+      - backend
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:

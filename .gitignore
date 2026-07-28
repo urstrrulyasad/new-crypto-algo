@@ -1,0 +1,9 @@
+.env
+node_modules/
+dist/
+target/
+__pycache__/
+*.pyc
+.venv/
+.idea/
+*.iml

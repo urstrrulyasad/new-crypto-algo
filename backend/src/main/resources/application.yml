@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: crypto-algo-backend
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:crypto_algo}?options=search_path%3D${DB_SCHEMA:quantdcx}
+    username: ${DB_USER:crypto}
+    password: ${DB_PASSWORD:crypto}
+  flyway:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:crypto_algo}
+    user: ${DB_USER:crypto}
+    password: ${DB_PASSWORD:crypto}
+    locations: classpath:db/migration
+    schemas: ${DB_SCHEMA:quantdcx}
+    create-schemas: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+app:
+  jwt:
+    # HS256 secret, base64; MUST be overridden in production
+    secret: ${JWT_SECRET:ZGV2LW9ubHktc2VjcmV0LWtleS1jaGFuZ2UtbWUtaW4tcHJvZC0wMTIzNDU2Nzg5}
+    access-ttl-minutes: ${JWT_ACCESS_TTL_MIN:30}
+    refresh-ttl-days: ${JWT_REFRESH_TTL_DAYS:14}
+  crypto:
+    # base64-encoded 32-byte AES key for encrypting exchange/AI secrets; override in prod
+    master-key: ${MASTER_KEY:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+  internal:
+    # shared token authenticating the Python strategy-engine -> backend signal calls
+    token: ${INTERNAL_TOKEN:dev-internal-token-change-me}
+  coindcx:
+    api-base: https://api.coindcx.com
+    public-base: https://public.coindcx.com
+  strategy-engine:
+    base-url: ${STRATEGY_ENGINE_URL:http://localhost:8000}
+  bootstrap:
+    # first-run super admin (created only if no users exist)
+    email: ${SUPERADMIN_EMAIL:admin@platform.local}
+    password: ${SUPERADMIN_PASSWORD:ChangeMe123!}
+  cors:
+    allowed-origins: ${CORS_ORIGINS:http://localhost:5173}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

@@ -1,0 +1,21 @@
+﻿python : INFO:     Started server process [20300]
+At line:1 char:87
++ ... alhost:8080'; python -m uvicorn app.main:app --port 8000 *>&1 | Out-F ...
++                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INFO:     Started server process [20300]:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-07-28 23:08:17,821 INFO httpx HTTP Request: GET http://localhost:8080/api/v1/internal/active-strategies "HTTP/1.1 
+200 OK"
+2026-07-28 23:08:22,011 INFO httpx HTTP Request: GET https://public.coindcx.com/market_data/candles?pair=B-BTC_USDT&int
+erval=1h&startTime=1780076298271&endTime=1783676298271&limit=1000 "HTTP/1.1 200 OK"
+2026-07-28 23:08:22,142 INFO httpx HTTP Request: GET https://public.coindcx.com/market_data/candles?pair=B-BTC_USDT&int
+erval=1h&startTime=1783676298271&endTime=1785260298288&limit=1000 "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:49348 - "POST /backtest HTTP/1.1" 200 OK
+2026-07-28 23:09:19,069 INFO httpx HTTP Request: GET http://localhost:8080/api/v1/internal/active-strategies "HTTP/1.1 
+200 OK"
+2026-07-28 23:10:20,408 INFO httpx HTTP Request: GET http://localhost:8080/api/v1/internal/active-strategies "HTTP/1.1 
+200 OK"
