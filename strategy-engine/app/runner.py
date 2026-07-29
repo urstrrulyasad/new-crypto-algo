@@ -63,15 +63,32 @@ async def evaluate_strategy(item: dict) -> None:
         df = strategy.populate_entry_trend(df)
         df = strategy.populate_exit_trend(df)
 
-        closed = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
+        # Last fully closed candle. Rising-edge only — level-based exit flags
+        # stay 1 for many bars and would otherwise spam EXIT every poll.
+        if len(df) < 2:
+            continue
+        closed = df.iloc[-2]
+        prev = df.iloc[-3] if len(df) >= 3 else None
+
+        def _on(row, col: str) -> bool:
+            if row is None:
+                return False
+            try:
+                return int(row.get(col, 0) or 0) == 1
+            except (TypeError, ValueError):
+                return False
+
+        def _rise(col: str) -> bool:
+            return _on(closed, col) and not _on(prev, col)
+
         action = None
-        if closed.get("enter_long", 0) == 1:
+        if _rise("enter_long"):
             action = "ENTRY_LONG"
-        elif closed.get("enter_short", 0) == 1:
+        elif _rise("enter_short"):
             action = "ENTRY_SHORT"
-        elif closed.get("exit_long", 0) == 1:
+        elif _rise("exit_long"):
             action = "EXIT_LONG"
-        elif closed.get("exit_short", 0) == 1:
+        elif _rise("exit_short"):
             action = "EXIT_SHORT"
         if action is None:
             continue

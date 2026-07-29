@@ -8,8 +8,8 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.03
-    minimal_roi = {"0": 0.015, "60": 0.01, "180": 0.005}
+    stoploss = -0.025
+    minimal_roi = {"0": 0.012, "60": 0.008, "180": 0.004}
     can_short = True
 
     def populate_indicators(self, df):
@@ -25,23 +25,30 @@ class Strategy:
 
     def populate_entry_trend(self, df):
         df = df.copy()
-        long_cond = (df["rsi"] < 35) & (df["close"] <= df["bb_low"]) & (df["ema_fast"] >= df["ema_slow"] * 0.998)
-        short_cond = (df["rsi"] > 65) & (df["close"] >= df["bb_high"]) & (df["ema_fast"] <= df["ema_slow"] * 1.002)
+        # Slightly looser than first cut so paper can accumulate closed trades
+        # under the LIVE gate without inventing prices.
+        long_cond = (df["rsi"] < 40) & (df["close"] <= df["bb_low"] * 1.002)
+        short_cond = (df["rsi"] > 60) & (df["close"] >= df["bb_high"] * 0.998)
         df["enter_long"] = long_cond.astype(int)
         df["enter_short"] = short_cond.astype(int)
         return df
 
     def populate_exit_trend(self, df):
         df = df.copy()
-        df["exit_long"] = ((df["rsi"] > 55) | (df["close"] >= df["bb_mid"])).astype(int)
-        df["exit_short"] = ((df["rsi"] < 45) | (df["close"] <= df["bb_mid"])).astype(int)
+        # Cross / reclaim exits — not "close >= mid" which stays true for hours.
+        rsi_up = (df["rsi"] > 55) & (df["rsi"].shift(1) <= 55)
+        rsi_dn = (df["rsi"] < 45) & (df["rsi"].shift(1) >= 45)
+        reclaim_mid = (df["close"] >= df["bb_mid"]) & (df["close"].shift(1) < df["bb_mid"])
+        lose_mid = (df["close"] <= df["bb_mid"]) & (df["close"].shift(1) > df["bb_mid"])
+        df["exit_long"] = (rsi_up | reclaim_mid).astype(int)
+        df["exit_short"] = (rsi_dn | lose_mid).astype(int)
         return df
 '''
 
 FALLBACK_CONFIG = {
     "timeframe": "5m",
-    "stoploss": -0.03,
-    "minimal_roi": {"0": 0.015, "60": 0.01, "180": 0.005},
+    "stoploss": -0.025,
+    "minimal_roi": {"0": 0.012, "60": 0.008, "180": 0.004},
     "can_short": True,
     "provider_used": "TEMPLATE",
     "model_used": "rsi-bb-fallback",
