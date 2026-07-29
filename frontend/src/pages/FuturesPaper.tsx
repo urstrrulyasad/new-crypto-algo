@@ -40,7 +40,7 @@ export default function FuturesPaper() {
       .then(setBots)
       .catch(() => setBots([]))
     api
-      .get<Position[]>('/api/v1/portfolio/positions')
+      .get<Position[]>('/api/v1/portfolio/positions?mode=PAPER')
       .then(setPositions)
       .catch(() => setPositions([]))
   }
