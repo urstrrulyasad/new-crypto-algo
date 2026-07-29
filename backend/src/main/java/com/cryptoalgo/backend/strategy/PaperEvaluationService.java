@@ -46,6 +46,8 @@ public class PaperEvaluationService {
     private final AppProperties props;
     private final ObjectMapper mapper;
     private final Set<UUID> catchupStarted = ConcurrentHashMap.newKeySet();
+    /** Avoid flooding audit_log every evaluate tick for the same BAD_BACKTEST. */
+    private final Set<UUID> badBacktestLogged = ConcurrentHashMap.newKeySet();
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
@@ -82,14 +84,40 @@ public class PaperEvaluationService {
 
     Mono<Void> evaluateOne(Strategy strategy) {
         if ("LIVE_APPROVED".equals(strategy.status())) {
-            return bots.findByStrategyId(strategy.id())
-                    .filter(b -> "LIVE".equals(b.mode()) && "RUNNING".equals(b.status()))
-                    .hasElements()
-                    .flatMap(hasLive -> {
-                        if (hasLive) return Mono.empty();
-                        return paperStats.forStrategy(strategy.id())
-                                .flatMap(stats -> createLiveBot(strategy, stats));
-                    });
+            return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
+                // Re-check current gate so config raises (e.g. 10 → 100) demote premature LIVE.
+                if (stats.closedTrades() < props.pipeline().minPaperTrades()
+                        || stats.winRate() < props.pipeline().winRateThreshold()) {
+                    log.warn("Demoting {} from LIVE_APPROVED — paper {}/{} trades wr={} (need {} @ {})",
+                            strategy.instrument(), stats.closedTrades(), props.pipeline().minPaperTrades(),
+                            stats.winRate(), props.pipeline().minPaperTrades(),
+                            props.pipeline().winRateThreshold());
+                    return bots.findByStrategyId(strategy.id())
+                            .filter(b -> "LIVE".equals(b.mode()) && "RUNNING".equals(b.status()))
+                            .flatMap(b -> bots.save(withStatus(b, "STOPPED")))
+                            .then(strategies.save(StrategyPipelineService.copy(strategy, "PAPER_TRADING")).then())
+                            .then(bots.findByStrategyId(strategy.id())
+                                    .filter(b -> "PAPER".equals(b.mode()))
+                                    .next()
+                                    .flatMap(b -> bots.save(withStatus(b, "RUNNING")))
+                                    .then())
+                            .then(audit.record(strategy.tenantId(), strategy.userId(),
+                                    "AUTO_LIVE_DEMOTED_GATE", "STRATEGY", strategy.id(),
+                                    Map.of(
+                                            "paperTrades", String.valueOf(stats.closedTrades()),
+                                            "requiredPaperTrades", String.valueOf(props.pipeline().minPaperTrades()),
+                                            "paperWinRate", String.valueOf(stats.winRate()),
+                                            "reason", "paper stats below current LIVE gate"
+                                    )));
+                }
+                return bots.findByStrategyId(strategy.id())
+                        .filter(b -> "LIVE".equals(b.mode()) && "RUNNING".equals(b.status()))
+                        .hasElements()
+                        .flatMap(hasLive -> {
+                            if (hasLive) return Mono.empty();
+                            return createLiveBot(strategy, stats);
+                        });
+            });
         }
         return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
             if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
@@ -104,17 +132,29 @@ public class PaperEvaluationService {
                     .flatMap(bt -> {
                         JsonNode metrics = readMetrics(bt.metrics());
                         if (!pipeline.passesLiveBacktestQuality(metrics)) {
+                            if (!badBacktestLogged.add(strategy.id())) {
+                                return Mono.just(false);
+                            }
+                            log.warn("LIVE skip BAD_BACKTEST for {} paperTrades={} wr={} btProfit={} btWr={}",
+                                    strategy.instrument(), stats.closedTrades(), stats.winRate(),
+                                    metrics.path("profit_total_pct").asText(),
+                                    metrics.path("win_rate").asText());
                             return audit.record(strategy.tenantId(), strategy.userId(),
                                     "AUTO_LIVE_SKIPPED_BAD_BACKTEST", "STRATEGY", strategy.id(),
                                     Map.of(
                                             "paperWinRate", String.valueOf(stats.winRate()),
                                             "paperTrades", String.valueOf(stats.closedTrades()),
+                                            "requiredPaperTrades", String.valueOf(props.pipeline().minPaperTrades()),
                                             "backtestProfit", metrics.path("profit_total_pct").asText(),
                                             "backtestWinRate", metrics.path("win_rate").asText(),
+                                            "backtestTrades", metrics.path("trades").asText(),
+                                            "backtestPF", metrics.path("profit_factor").asText(),
+                                            "reason", "backtest fails LIVE quality (WR/profit/PF/DD)",
                                             "requiredPaperWinRate", String.valueOf(props.pipeline().winRateThreshold())
                                     ))
                                     .thenReturn(false);
                         }
+                        badBacktestLogged.remove(strategy.id());
                         return promote(strategy, stats).thenReturn(true);
                     })
                     .switchIfEmpty(audit.record(strategy.tenantId(), strategy.userId(),
@@ -146,7 +186,7 @@ public class PaperEvaluationService {
                 "pairs", List.of(strategy.instrument()),
                 "timeframe", tf,
                 "market_type", "FUTURES",
-                "bars", 800
+                "bars", 2500
         );
         log.info("Paper catchup starting for {} ({})", strategy.instrument(), strategy.id());
         engine.paperCatchup(req)

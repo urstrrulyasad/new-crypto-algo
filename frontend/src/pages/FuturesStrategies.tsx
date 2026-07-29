@@ -55,8 +55,43 @@ const STATUS_TONE: Record<string, 'success' | 'info' | 'warn' | 'danger' | 'defa
   ARCHIVED: 'default',
 }
 
+function coinKey(s: Strategy): string {
+  return s.instrument || s.config?.pairs?.[0] || 'UNKNOWN'
+}
+
+function shortCoin(pair: string): string {
+  return pair.replace(/^B-/, '').replace(/_USDT$/, '').replace(/_INR$/, '')
+}
+
+interface CoinBucket {
+  instrument: string
+  strategies: Strategy[]
+  bestStatus: string
+}
+
+function groupByCoin(list: Strategy[]): CoinBucket[] {
+  const map = new Map<string, Strategy[]>()
+  for (const s of list) {
+    const k = coinKey(s)
+    const arr = map.get(k) ?? []
+    arr.push(s)
+    map.set(k, arr)
+  }
+  const rank = (status: string) => {
+    const i = ['LIVE_APPROVED', 'PAPER_TRADING', 'BACKTESTED', 'GENERATED', 'REJECTED', 'ARCHIVED'].indexOf(status)
+    return i < 0 ? 99 : i
+  }
+  return [...map.entries()]
+    .map(([instrument, strategies]) => {
+      const sorted = [...strategies].sort((a, b) => rank(a.status) - rank(b.status))
+      return { instrument, strategies: sorted, bestStatus: sorted[0]?.status ?? 'GENERATED' }
+    })
+    .sort((a, b) => shortCoin(a.instrument).localeCompare(shortCoin(b.instrument)))
+}
+
 export default function FuturesStrategies() {
   const [strategies, setStrategies] = useState<Strategy[] | null>(null)
+  const [selectedCoin, setSelectedCoin] = useState<string | null>(null)
   const [selected, setSelected] = useState<Strategy | null>(null)
 
   const load = () =>
@@ -74,62 +109,122 @@ export default function FuturesStrategies() {
     return () => clearInterval(poll)
   }, [])
 
+  const coins = strategies ? groupByCoin(strategies) : null
+  const coinStrategies =
+    coins && selectedCoin ? coins.find((c) => c.instrument === selectedCoin)?.strategies ?? [] : []
+
   return (
     <div>
       <PageTitle
         title="Futures Strategies"
-        subtitle="Hands-off INR futures pipeline — one AI strategy per top instrument"
+        subtitle="Pick a coin, then inspect the AI strategies generated for it"
       />
 
       <div className="mb-5 rounded-xl border border-edge/60 bg-surface/40 px-4 py-3 text-sm text-slate-400">
-        Strategies are generated automatically. Backtest is a smoke screen into paper.
-        LIVE requires ≥75% paper win rate over the required closed trades and a profitable
+        Strategies are generated automatically per coin. Backtest is a smoke screen into paper.
+        LIVE requires ≥75 profitable closed paper trades out of 100 (75% WR) plus a profitable
         quality backtest (win rate, profit factor, positive PnL).
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-3">
-        <div className="space-y-3 xl:col-span-1">
-          {strategies === null ? (
+      {!selectedCoin ? (
+        <div>
+          <p className="mb-3 text-xs uppercase tracking-widest text-slate-500">Coins with strategies</p>
+          {coins === null ? (
             <Spinner />
-          ) : strategies.length === 0 ? (
+          ) : coins.length === 0 ? (
             <Empty message="Waiting for the auto scheduler to generate the first futures strategies…" />
           ) : (
-            strategies.map((s, i) => (
-              <motion.button
-                key={s.id}
-                initial={{ opacity: 0, y: 14 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: Math.min(i * 0.04, 0.35) }}
-                onClick={() => setSelected(s)}
-                className={`glass w-full rounded-2xl p-4 text-left transition-all duration-200 hover:border-cyan-500/40 ${selected?.id === s.id ? 'border-cyan-500/60 ring-1 ring-cyan-500/30' : ''}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-medium text-slate-100">{s.instrument ?? s.name}</span>
-                  <Badge tone={STATUS_TONE[s.status] ?? 'warn'}>{s.status.replace('_', ' ')}</Badge>
-                </div>
-                <div className="mt-1 flex gap-2 text-xs text-slate-500">
-                  <span>{s.marginCurrency ?? 'INR'}</span>
-                  <span>·</span>
-                  <span>{s.config?.timeframe ?? '1h'}</span>
-                </div>
-                {(s.status === 'PAPER_TRADING' || s.status === 'LIVE_APPROVED') && (
-                  <PaperBar paper={s.paper} compact />
-                )}
-              </motion.button>
-            ))
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {coins.map((c, i) => (
+                <motion.button
+                  key={c.instrument}
+                  type="button"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: Math.min(i * 0.03, 0.3) }}
+                  onClick={() => {
+                    setSelectedCoin(c.instrument)
+                    setSelected(c.strategies[0] ?? null)
+                  }}
+                  className="glass rounded-2xl p-4 text-left transition-all duration-200 hover:border-cyan-500/40"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-slate-100">{shortCoin(c.instrument)}</span>
+                    <Badge tone={STATUS_TONE[c.bestStatus] ?? 'warn'}>
+                      {c.bestStatus.replace('_', ' ')}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500">{c.instrument}</div>
+                  <div className="mt-2 text-xs text-slate-400">
+                    {c.strategies.length} strateg{c.strategies.length === 1 ? 'y' : 'ies'}
+                  </div>
+                </motion.button>
+              ))}
+            </div>
           )}
         </div>
+      ) : (
+        <div>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSelectedCoin(null)
+                setSelected(null)
+              }}
+            >
+              ← All coins
+            </Button>
+            <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
+              {shortCoin(selectedCoin)}
+              <span className="ml-2 text-sm font-normal text-slate-500">{selectedCoin}</span>
+            </h2>
+          </div>
 
-        <div className="xl:col-span-2">
-          {selected ? (
-            <StrategyDetail strategy={selected} />
-          ) : (
-            <Card>
-              <Empty message="Select a strategy to inspect its pipeline and backtest." />
-            </Card>
-          )}
+          <div className="grid gap-6 xl:grid-cols-3">
+            <div className="space-y-3 xl:col-span-1">
+              {coinStrategies.length === 0 ? (
+                <Empty message="No strategies for this coin yet." />
+              ) : (
+                coinStrategies.map((s, i) => (
+                  <motion.button
+                    key={s.id}
+                    type="button"
+                    initial={{ opacity: 0, y: 14 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: Math.min(i * 0.04, 0.35) }}
+                    onClick={() => setSelected(s)}
+                    className={`glass w-full rounded-2xl p-4 text-left transition-all duration-200 hover:border-cyan-500/40 ${selected?.id === s.id ? 'border-cyan-500/60 ring-1 ring-cyan-500/30' : ''}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-slate-100">{s.name}</span>
+                      <Badge tone={STATUS_TONE[s.status] ?? 'warn'}>{s.status.replace('_', ' ')}</Badge>
+                    </div>
+                    <div className="mt-1 flex gap-2 text-xs text-slate-500">
+                      <span>{s.marginCurrency ?? 'INR'}</span>
+                      <span>·</span>
+                      <span>{s.config?.timeframe ?? '1h'}</span>
+                    </div>
+                    {(s.status === 'PAPER_TRADING' || s.status === 'LIVE_APPROVED') && (
+                      <PaperBar paper={s.paper} compact />
+                    )}
+                  </motion.button>
+                ))
+              )}
+            </div>
+
+            <div className="xl:col-span-2">
+              {selected ? (
+                <StrategyDetail strategy={selected} />
+              ) : (
+                <Card>
+                  <Empty message="Select a strategy to inspect its pipeline and backtest." />
+                </Card>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -360,6 +455,9 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
               <li key={`${s.action}-${s.createdAt}-${i}`}>
                 <span className="text-rose-300">{s.action.replace('AUTO_LIVE_SKIPPED_', '')}</span>
                 {s.details?.reason ? ` — ${s.details.reason}` : ''}
+                {s.details?.backtestProfit != null
+                  ? ` · bt profit ${s.details.backtestProfit}% WR ${Number(s.details.backtestWinRate ?? 0) * 100}%`
+                  : ''}
                 {s.details?.available != null ? ` (INR avail ${s.details.available})` : ''}
                 <span className="ml-2 text-slate-600">{new Date(s.createdAt).toLocaleString()}</span>
               </li>

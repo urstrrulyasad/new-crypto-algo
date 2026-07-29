@@ -1,0 +1,15 @@
+---
+description: Mandatory Playwright MCP for all browser/UI testing and QA
+alwaysApply: true
+---
+
+# Mandatory Playwright MCP for testing
+
+When the user asks to test, QA, verify, validate, or check anything in the UI/browser (including `/qa`, `/gstack-qa`, `/qa-only`, smoke checks, login, dashboards, LIVE/paper trading screens):
+
+1. **Use Playwright MCP (`user-browser`) only** for browser automation.
+2. **Do not** substitute gstack browse CLI, curl-only checks, or "manual instructions" as the primary browser path.
+3. Prefer: `browser_tabs` (new/list) → `browser_navigate` → `browser_snapshot` → `browser_fill_form` / `browser_click` → `browser_take_screenshot`.
+4. If Playwright MCP times out or the session is dead: close/recreate the tab (`browser_tabs` action `new`), then retry login and continue. Do not silently switch tools.
+5. API/DB checks may support evidence, but UI proof must come from Playwright MCP screenshots/snapshots.
+6. After screenshots, show them to the user (Read the image files).

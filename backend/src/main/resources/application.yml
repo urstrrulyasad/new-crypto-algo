@@ -40,7 +40,8 @@ app:
   cors:
     allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   pipeline:
-    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:10}
+    # LIVE needs 100 closed paper trades with ≥75 winners (75% WR) + quality backtest.
+    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:100}
     win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.75}
     backtest-days: ${PIPELINE_BACKTEST_DAYS:30}
     paper-stake: ${PIPELINE_PAPER_STAKE:1000}
