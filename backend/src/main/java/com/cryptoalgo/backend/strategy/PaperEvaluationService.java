@@ -112,12 +112,15 @@ public class PaperEvaluationService {
                                             "backtestProfit", metrics.path("profit_total_pct").asText(),
                                             "backtestWinRate", metrics.path("win_rate").asText(),
                                             "requiredPaperWinRate", String.valueOf(props.pipeline().winRateThreshold())
-                                    )).then();
+                                    ))
+                                    .thenReturn(false);
                         }
-                        return promote(strategy, stats);
+                        return promote(strategy, stats).thenReturn(true);
                     })
                     .switchIfEmpty(audit.record(strategy.tenantId(), strategy.userId(),
-                            "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY", strategy.id(), Map.of()).then());
+                            "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY", strategy.id(), Map.of())
+                            .thenReturn(false))
+                    .then();
         });
     }
 
