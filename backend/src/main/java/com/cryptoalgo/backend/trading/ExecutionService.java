@@ -319,7 +319,7 @@ public class ExecutionService {
                             .flatMap(inst -> {
                                 BigDecimal qty = stake.multiply(BigDecimal.valueOf(leverage))
                                         .divide(price, MathContext.DECIMAL64)
-                                        .setScale(8, RoundingMode.DOWN);
+                                        .setScale(0, RoundingMode.DOWN);
                                 BigDecimal notional = qty.multiply(price);
                                 if (qty.signum() <= 0
                                         || qty.compareTo(inst.minQuantity()) < 0
