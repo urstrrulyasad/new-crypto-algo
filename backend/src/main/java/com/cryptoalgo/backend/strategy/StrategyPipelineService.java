@@ -7,6 +7,7 @@ import com.cryptoalgo.backend.domain.Backtest;
 import com.cryptoalgo.backend.domain.Bot;
 import com.cryptoalgo.backend.domain.Strategy;
 import com.cryptoalgo.backend.repo.BacktestRepository;
+import com.cryptoalgo.backend.repo.BotRepository;
 import com.cryptoalgo.backend.repo.StrategyRepository;
 import com.cryptoalgo.backend.trading.CoinDcxFuturesClient;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,6 +40,7 @@ public class StrategyPipelineService {
     private final CoinDcxFuturesClient futures;
     private final StrategyRepository strategies;
     private final BacktestRepository backtests;
+    private final BotRepository bots;
     private final R2dbcEntityTemplate template;
     private final ObjectMapper mapper;
     private final AuditService audit;
@@ -46,13 +48,15 @@ public class StrategyPipelineService {
 
     public StrategyPipelineService(AiChainService aiChain, StrategyEngineClient engine,
                                    CoinDcxFuturesClient futures, StrategyRepository strategies,
-                                   BacktestRepository backtests, R2dbcEntityTemplate template,
+                                   BacktestRepository backtests, BotRepository bots,
+                                   R2dbcEntityTemplate template,
                                    ObjectMapper mapper, AuditService audit, AppProperties props) {
         this.aiChain = aiChain;
         this.engine = engine;
         this.futures = futures;
         this.strategies = strategies;
         this.backtests = backtests;
+        this.bots = bots;
         this.template = template;
         this.mapper = mapper;
         this.audit = audit;
@@ -208,12 +212,17 @@ public class StrategyPipelineService {
     }
 
     private Mono<Bot> startPaperBot(Strategy strategy, List<String> pairs) {
-        Bot bot = new Bot(UUID.randomUUID(), strategy.tenantId(), strategy.userId(), strategy.id(),
-                null, strategy.name() + " · paper", "PAPER", "FUTURES", toJson(pairs), "INR",
-                props.pipeline().paperStake(), props.pipeline().maxOpenTrades(),
-                BigDecimal.valueOf(props.pipeline().futuresLeverage()), "RUNNING", false,
-                "INR", Instant.now(), Instant.now());
-        return template.insert(bot);
+        return bots.findByStrategyId(strategy.id())
+                .filter(b -> "PAPER".equals(b.mode()) && "RUNNING".equals(b.status()))
+                .next()
+                .switchIfEmpty(Mono.defer(() -> {
+                    Bot bot = new Bot(UUID.randomUUID(), strategy.tenantId(), strategy.userId(), strategy.id(),
+                            null, strategy.name() + " · paper", "PAPER", "FUTURES", toJson(pairs), "INR",
+                            props.pipeline().paperStake(), props.pipeline().maxOpenTrades(),
+                            BigDecimal.valueOf(props.pipeline().futuresLeverage()), "RUNNING", false,
+                            "INR", Instant.now(), Instant.now());
+                    return template.insert(bot);
+                }));
     }
 
     private Mono<Void> setStatus(UUID strategyId, String status) {

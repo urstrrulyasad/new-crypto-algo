@@ -114,17 +114,19 @@ public class AutoStrategyScheduler {
                                                 bt.metrics(), bt.trades(), "interrupted (stale RUNNING)",
                                                 bt.createdAt(), Instant.now()))
                                         .doOnSuccess(v -> pipeline.continuePipeline(s))
-                                        .then();
+                                        .thenReturn(true);
                             }
                             if ("FAILED".equals(bt.status()) || "DONE".equals(bt.status())) {
                                 log.info("Resuming GENERATED {} after backtest {}", s.instrument(), bt.status());
-                                return Mono.fromRunnable(() -> pipeline.continuePipeline(s));
+                                pipeline.continuePipeline(s);
+                                return Mono.just(true);
                             }
-                            return Mono.empty();
+                            return Mono.just(false);
                         })
-                        .switchIfEmpty(Mono.fromRunnable(() -> {
+                        .switchIfEmpty(Mono.fromCallable(() -> {
                             log.info("Resuming GENERATED {} with no backtest row", s.instrument());
                             pipeline.continuePipeline(s);
+                            return true;
                         })))
                 .then();
     }
