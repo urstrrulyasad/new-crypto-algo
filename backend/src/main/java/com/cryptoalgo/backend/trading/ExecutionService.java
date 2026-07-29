@@ -308,7 +308,21 @@ public class ExecutionService {
                 : bot.leverage().intValue();
         String margin = "INR";
         return withKey(bot).flatMap(key -> futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
-                .flatMap(available -> futuresClient.usdtInrRate().flatMap(usdtInr -> {
+                .flatMap(available0 -> {
+                    // Ensure enough INR futures margin for min notional (~6 USDT * USDTINR / lev).
+                    BigDecimal topUpTarget = BigDecimal.valueOf(200);
+                    Mono<BigDecimal> funded = available0.compareTo(topUpTarget) >= 0
+                            ? Mono.just(available0)
+                            : futuresClient.transferSpotToFutures(key.apiKey(), key.apiSecret(), "INR",
+                                            topUpTarget.subtract(available0.max(BigDecimal.ZERO)))
+                                    .doOnNext(r -> log.info("Topped up INR futures wallet from spot: {}", r))
+                                    .onErrorResume(e -> {
+                                        log.warn("Spot→futures INR transfer failed: {}", e.getMessage());
+                                        return Mono.empty();
+                                    })
+                                    .then(futuresClient.availableInrBalance(key.apiKey(), key.apiSecret()))
+                                    .defaultIfEmpty(available0);
+                    return funded.flatMap(available -> futuresClient.usdtInrRate().flatMap(usdtInr -> {
                     BigDecimal maxWallet = available.multiply(BigDecimal.valueOf(props.pipeline().maxWalletPct()));
                     BigDecimal stake = bot.stakeAmount().min(maxWallet)
                             .divide(BigDecimal.valueOf(slots), MathContext.DECIMAL64);
@@ -401,7 +415,8 @@ public class ExecutionService {
                                                     .then();
                                         });
                             });
-                })));
+                    }));
+                }));
     }
 
     private Mono<Void> placeLiveEntry(Bot bot, Signal signal, DecryptedKey key, String market,
