@@ -308,7 +308,7 @@ public class ExecutionService {
                 : bot.leverage().intValue();
         String margin = "INR";
         return withKey(bot).flatMap(key -> futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
-                .flatMap(available -> {
+                .flatMap(available -> futuresClient.usdtInrRate().flatMap(usdtInr -> {
                     BigDecimal maxWallet = available.multiply(BigDecimal.valueOf(props.pipeline().maxWalletPct()));
                     BigDecimal stake = bot.stakeAmount().min(maxWallet)
                             .divide(BigDecimal.valueOf(slots), MathContext.DECIMAL64);
@@ -317,15 +317,24 @@ public class ExecutionService {
                     }
                     return futuresClient.instrumentDetails(pair, margin)
                             .flatMap(inst -> {
+                                // INR margin: qty * price_usdt * usdtInr / leverage ≈ stake
+                                BigDecimal denom = price.multiply(usdtInr);
+                                if (denom.signum() <= 0) {
+                                    return skip(bot, signal, "invalid price or USDTINR rate");
+                                }
                                 BigDecimal qty = stake.multiply(BigDecimal.valueOf(leverage))
-                                        .divide(price, MathContext.DECIMAL64)
+                                        .divide(denom, MathContext.DECIMAL64)
                                         .setScale(0, RoundingMode.DOWN);
-                                BigDecimal notional = qty.multiply(price);
+                                BigDecimal notionalUsdt = qty.multiply(price);
+                                BigDecimal marginInr = notionalUsdt.multiply(usdtInr)
+                                        .divide(BigDecimal.valueOf(leverage), MathContext.DECIMAL64);
                                 if (qty.signum() <= 0
                                         || qty.compareTo(inst.minQuantity()) < 0
-                                        || notional.compareTo(inst.minNotional()) < 0) {
+                                        || notionalUsdt.compareTo(inst.minNotional()) < 0) {
                                     String reason = "below min notional/qty (qty=" + qty.toPlainString()
-                                            + " notional=" + notional.toPlainString()
+                                            + " notionalUsdt=" + notionalUsdt.toPlainString()
+                                            + " marginInr=" + marginInr.toPlainString()
+                                            + " usdtInr=" + usdtInr.toPlainString()
                                             + " minQty=" + inst.minQuantity()
                                             + " minNotional=" + inst.minNotional() + ")";
                                     log.warn("Bot {} skipped LIVE futures entry: {}", bot.id(), reason);
@@ -367,7 +376,9 @@ public class ExecutionService {
                                                             "LIVE_FUTURES_ORDER", "ORDER", order.id(),
                                                             Map.of("pair", pair, "side", side,
                                                                     "qty", fillQty.toPlainString(),
-                                                                    "margin", margin)));
+                                                                    "margin", margin,
+                                                                    "usdtInr", usdtInr.toPlainString(),
+                                                                    "marginInr", marginInr.toPlainString())));
                                         })
                                         .onErrorResume(e -> {
                                             log.error("CoinDCX futures placeOrder failed for bot {}: {}",
@@ -390,7 +401,7 @@ public class ExecutionService {
                                                     .then();
                                         });
                             });
-                }));
+                })));
     }
 
     private Mono<Void> placeLiveEntry(Bot bot, Signal signal, DecryptedKey key, String market,

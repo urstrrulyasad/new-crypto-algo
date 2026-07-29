@@ -174,6 +174,28 @@ public class CoinDcxFuturesClient {
                 });
     }
 
+    /**
+     * Spot USDT→INR rate for sizing INR-margined futures (notional is USDT-quoted).
+     */
+    public Mono<BigDecimal> usdtInrRate() {
+        return api.get().uri("/exchange/ticker")
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .timeout(Duration.ofSeconds(15))
+                .map(node -> {
+                    if (node != null && node.isArray()) {
+                        for (JsonNode t : node) {
+                            if ("USDTINR".equalsIgnoreCase(t.path("market").asText())) {
+                                return new BigDecimal(t.path("last_price").asText("0"));
+                            }
+                        }
+                    }
+                    return BigDecimal.ZERO;
+                })
+                .filter(r -> r.signum() > 0)
+                .switchIfEmpty(Mono.error(ApiException.upstream("USDTINR rate unavailable")));
+    }
+
     public Mono<JsonNode> placeOrder(String apiKey, String apiSecret, String pair, String side,
                                      BigDecimal quantity, int leverage, String marginCurrency,
                                      BigDecimal takeProfit, BigDecimal stopLoss) {
