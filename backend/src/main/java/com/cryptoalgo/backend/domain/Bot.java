@@ -12,4 +12,5 @@ import java.util.UUID;
 public record Bot(@Id UUID id, UUID tenantId, UUID userId, UUID strategyId, UUID exchangeKeyId,
                   String name, String mode, String marketType, Json pairs, String stakeCurrency,
                   BigDecimal stakeAmount, int maxOpenTrades, BigDecimal leverage, String status,
-                  boolean killSwitch, Instant createdAt, Instant updatedAt) {}
+                  boolean killSwitch, String marginCurrency,
+                  Instant createdAt, Instant updatedAt) {}

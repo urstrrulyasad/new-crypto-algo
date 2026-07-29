@@ -14,15 +14,13 @@ import reactor.core.publisher.Mono;
 import java.math.BigDecimal;
 
 /**
- * Watches every OPEN position against the live ticker.
+ * Watches every OPEN position against live market price.
  *
- * Paper: simulates the protective exits - closes at sl_price when price drops
- * through the stop, or at target_price when the target is reached. This makes
- * the paper win-rate gate honest (same exits a live bot would experience).
+ * FUTURES: CoinDCX futures last/mark (not spot ticker — symbols do not match).
+ * SPOT: CoinDCX spot ticker.
  *
- * Live: the SL leg rests on the exchange as a stop_limit order; on target the
- * guard cancels the SL leg and market-sells. If the exchange SL was hit, the
- * guard notices the filled SL order and closes the position record.
+ * Paper: simulates protective exits at sl_price / target_price.
+ * Live: SL leg on exchange; target cancels SL and market-exits.
  */
 @Service
 public class PositionGuardService {
@@ -32,15 +30,17 @@ public class PositionGuardService {
     private final PositionRepository positions;
     private final BotRepository bots;
     private final TickerService ticker;
+    private final CoinDcxFuturesClient futures;
     private final ExecutionService execution;
     private final CoinDcxTradeClient trade;
 
     public PositionGuardService(PositionRepository positions, BotRepository bots,
-                                TickerService ticker, ExecutionService execution,
-                                CoinDcxTradeClient trade) {
+                                TickerService ticker, CoinDcxFuturesClient futures,
+                                ExecutionService execution, CoinDcxTradeClient trade) {
         this.positions = positions;
         this.bots = bots;
         this.ticker = ticker;
+        this.futures = futures;
         this.execution = execution;
         this.trade = trade;
     }
@@ -57,36 +57,39 @@ public class PositionGuardService {
 
     private Mono<Void> check(Position pos) {
         if (pos.slPrice() == null && pos.targetPrice() == null) return Mono.empty();
-        TickerService.Tick tick = ticker.last(ExecutionService.pairToMarket(pos.pair()));
-        if (tick == null) return Mono.empty();
-        BigDecimal price = tick.lastPrice();
+        return bots.findById(pos.botId()).flatMap(bot -> markPrice(bot, pos.pair())
+                .flatMap(price -> {
+                    boolean isShort = "SHORT".equals(pos.side());
+                    boolean hitSl = pos.slPrice() != null && (isShort
+                            ? price.compareTo(pos.slPrice()) >= 0
+                            : price.compareTo(pos.slPrice()) <= 0);
+                    boolean hitTarget = pos.targetPrice() != null && (isShort
+                            ? price.compareTo(pos.targetPrice()) <= 0
+                            : price.compareTo(pos.targetPrice()) >= 0);
+                    if (!hitSl && !hitTarget) return Mono.empty();
 
-        // Spot bots are long-only; SHORT positions only exist on futures (not live yet).
-        boolean hitSl = pos.slPrice() != null && price.compareTo(pos.slPrice()) <= 0;
-        boolean hitTarget = pos.targetPrice() != null && price.compareTo(pos.targetPrice()) >= 0;
-        if (!hitSl && !hitTarget) return Mono.empty();
-
-        return bots.findById(pos.botId()).flatMap(bot -> {
-            if ("PAPER".equals(bot.mode())) {
-                return hitSl
-                        ? execution.closePaperPosition(bot, pos, pos.slPrice(), null, "STOP_LOSS")
-                        : execution.closePaperPosition(bot, pos, pos.targetPrice(), null, "TARGET");
-            }
-            return hitTarget ? liveTarget(bot, pos, price) : liveSlCheck(bot, pos, price);
-        });
+                    if ("PAPER".equals(bot.mode())) {
+                        return hitSl
+                                ? execution.closePaperPosition(bot, pos, pos.slPrice(), null, "STOP_LOSS")
+                                : execution.closePaperPosition(bot, pos, pos.targetPrice(), null, "TARGET");
+                    }
+                    return hitTarget ? liveTarget(bot, pos, price) : liveSlCheck(bot, pos, price);
+                }));
     }
 
-    /** Target reached on a live position: cancel the SL leg and market-sell. */
+    private Mono<BigDecimal> markPrice(Bot bot, String pair) {
+        if ("FUTURES".equals(bot.marketType())) {
+            return futures.lastPrice(pair);
+        }
+        TickerService.Tick tick = ticker.last(ExecutionService.pairToMarket(pair));
+        return tick == null ? Mono.empty() : Mono.just(tick.lastPrice());
+    }
+
     private Mono<Void> liveTarget(Bot bot, Position pos, BigDecimal price) {
         log.info("Live position {} hit target at {}", pos.id(), price);
         return execution.liveExit(bot, pos, price, null, "TARGET");
     }
 
-    /**
-     * Price is at/below the stop: the exchange-side stop_limit should have
-     * fired. Reconcile - if it filled, close the position at its average
-     * price; if there is no SL leg (placement failed earlier), exit at market.
-     */
     private Mono<Void> liveSlCheck(Bot bot, Position pos, BigDecimal price) {
         if (pos.slOrderId() == null) {
             log.warn("Live position {} has no SL leg; exiting at market {}", pos.id(), price);
@@ -103,10 +106,9 @@ public class PositionGuardService {
                                 return execution.closePosition(pos, avg);
                             }
                             if (s.contains("cancelled") || s.contains("rejected")) {
-                                // SL leg is gone: protect at market
                                 return execution.liveExit(bot, pos, price, null, "STOP_LOSS");
                             }
-                            return Mono.empty(); // stop triggered but not filled yet; wait
+                            return Mono.empty();
                         }));
     }
 }

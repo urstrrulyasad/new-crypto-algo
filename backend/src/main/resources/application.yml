@@ -38,18 +38,27 @@ app:
     email: ${SUPERADMIN_EMAIL:admin@platform.local}
     password: ${SUPERADMIN_PASSWORD:ChangeMe123!}
   cors:
-    allowed-origins: ${CORS_ORIGINS:http://localhost:5173}
+    allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   pipeline:
-    # paper-trade gate: auto-approve for live once >= min-paper-trades closed
-    # with a win rate >= win-rate-threshold
     min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:10}
     win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.75}
     backtest-days: ${PIPELINE_BACKTEST_DAYS:30}
-    # defaults for auto-created bots / risk when the AI config omits them
     paper-stake: ${PIPELINE_PAPER_STAKE:1000}
     max-open-trades: ${PIPELINE_MAX_OPEN_TRADES:3}
     default-stoploss: ${PIPELINE_DEFAULT_STOPLOSS:-0.05}
     default-target-roi: ${PIPELINE_DEFAULT_TARGET_ROI:0.04}
+    futures-leverage: ${PIPELINE_FUTURES_LEVERAGE:3}
+    max-instruments: ${PIPELINE_MAX_INSTRUMENTS:30}
+    min-backtest-trades: ${PIPELINE_MIN_BACKTEST_TRADES:20}
+    max-backtest-drawdown-pct: ${PIPELINE_MAX_BACKTEST_DD:40}
+    # Backtest must also be profitable quality — not just enough trades / DD.
+    min-backtest-win-rate: ${PIPELINE_MIN_BACKTEST_WIN_RATE:0.55}
+    min-backtest-profit-pct: ${PIPELINE_MIN_BACKTEST_PROFIT_PCT:0}
+    min-backtest-profit-factor: ${PIPELINE_MIN_BACKTEST_PF:1.0}
+    max-live-bots: ${PIPELINE_MAX_LIVE_BOTS:10}
+    max-wallet-pct: ${PIPELINE_MAX_WALLET_PCT:0.5}
+    auto-gen-ms: ${PIPELINE_AUTO_GEN_MS:300000}
+    evaluate-ms: ${PIPELINE_EVALUATE_MS:60000}
 
 management:
   endpoints:

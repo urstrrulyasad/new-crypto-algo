@@ -1,11 +1,4 @@
-"""Signal runner: evaluates active strategies on each closed candle.
-
-Polls the backend for strategies that have RUNNING bots, downloads the recent
-candles per pair, executes the strategy, and when the last CLOSED candle
-carries an entry/exit signal, POSTs it to the backend's internal signal
-endpoint with an idempotency key (strategy+pair+candle-timestamp), so repeated
-evaluation never causes duplicate orders.
-"""
+"""Signal runner: evaluates active FUTURES strategies on each closed candle."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +8,7 @@ import time
 import httpx
 
 from .config import BACKEND_URL, INTERNAL_TOKEN, SIGNAL_POLL_SECONDS
-from .data import fetch_candles, normalize_timeframe, _TF_MS
+from .data import fetch_candles, normalize_timeframe, _TF_MS, _FUT_MS
 from .validation import validate_strategy_code, load_strategy_class
 
 log = logging.getLogger("runner")
@@ -25,7 +18,7 @@ async def run_forever() -> None:
     while True:
         try:
             await evaluate_all()
-        except Exception:  # noqa: BLE001 - keep the loop alive, log everything
+        except Exception:  # noqa: BLE001
             log.exception("Signal evaluation cycle failed")
         await asyncio.sleep(SIGNAL_POLL_SECONDS)
 
@@ -50,31 +43,36 @@ async def evaluate_all() -> None:
 
 async def evaluate_strategy(item: dict) -> None:
     source = item["sourceCode"]
-    timeframe = normalize_timeframe(item.get("timeframe", "1h"))
+    market_type = item.get("marketType", "FUTURES")
+    timeframe = normalize_timeframe(item.get("timeframe", "1h"), market_type)
     check = validate_strategy_code(source)
     if not check["valid"]:
         log.error("Active strategy %s failed validation: %s", item["strategyId"], check["errors"])
         return
     strategy_cls = load_strategy_class(source)
 
-    tf_ms = _TF_MS.get(timeframe, 3_600_000)
+    tf_map = _FUT_MS if market_type.upper() == "FUTURES" else _TF_MS
+    tf_ms = tf_map.get(timeframe, 3_600_000)
     now_ms = int(time.time() * 1000)
-    start_ms = now_ms - tf_ms * 300  # 300 candles of context
+    start_ms = now_ms - tf_ms * 300
 
     for pair in item.get("pairs", []):
-        df = await fetch_candles(pair, timeframe, start_ms, now_ms)
+        df = await fetch_candles(pair, timeframe, start_ms, now_ms, market_type)
         strategy = strategy_cls()
         df = strategy.populate_indicators(df)
         df = strategy.populate_entry_trend(df)
         df = strategy.populate_exit_trend(df)
 
-        # last CLOSED candle: the final row may still be forming, use the one before it
         closed = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
         action = None
         if closed.get("enter_long", 0) == 1:
             action = "ENTRY_LONG"
+        elif closed.get("enter_short", 0) == 1:
+            action = "ENTRY_SHORT"
         elif closed.get("exit_long", 0) == 1:
             action = "EXIT_LONG"
+        elif closed.get("exit_short", 0) == 1:
+            action = "EXIT_SHORT"
         if action is None:
             continue
 

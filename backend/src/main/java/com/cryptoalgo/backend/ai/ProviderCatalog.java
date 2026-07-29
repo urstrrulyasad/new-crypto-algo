@@ -18,7 +18,7 @@ public final class ProviderCatalog {
     public static final List<Preset> PRESETS = List.of(
             new Preset("GEMINI", "Google Gemini", "GEMINI",
                     "https://generativelanguage.googleapis.com",
-                    List.of("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")),
+                    List.of("gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest")),
             new Preset("GROQ", "Groq", "OPENAI",
                     "https://api.groq.com/openai",
                     List.of("llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant")),

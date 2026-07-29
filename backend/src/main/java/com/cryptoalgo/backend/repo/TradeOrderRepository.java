@@ -9,5 +9,6 @@ import java.util.UUID;
 public interface TradeOrderRepository extends ReactiveCrudRepository<TradeOrder, UUID> {
     Flux<TradeOrder> findByTenantIdAndUserIdOrderByCreatedAtDesc(UUID tenantId, UUID userId);
     Flux<TradeOrder> findByTenantIdAndBotIdOrderByCreatedAtDesc(UUID tenantId, UUID botId);
+    Flux<TradeOrder> findByBotIdOrderByCreatedAtDesc(UUID botId);
     Flux<TradeOrder> findByStatusAndModeOrderByCreatedAtAsc(String status, String mode);
 }

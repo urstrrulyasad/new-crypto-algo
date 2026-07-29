@@ -8,4 +8,6 @@ import java.util.UUID;
 
 public interface AuditLogRepository extends ReactiveCrudRepository<AuditLog, UUID> {
     Flux<AuditLog> findTop100ByTenantIdOrderByCreatedAtDesc(UUID tenantId);
+    Flux<AuditLog> findByTenantIdAndEntityTypeAndEntityIdOrderByCreatedAtDesc(
+            UUID tenantId, String entityType, UUID entityId);
 }

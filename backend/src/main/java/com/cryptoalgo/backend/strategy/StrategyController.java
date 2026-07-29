@@ -2,8 +2,14 @@ package com.cryptoalgo.backend.strategy;
 
 import com.cryptoalgo.backend.common.ApiException;
 import com.cryptoalgo.backend.config.AppProperties;
+import com.cryptoalgo.backend.domain.Position;
 import com.cryptoalgo.backend.domain.Strategy;
+import com.cryptoalgo.backend.domain.TradeOrder;
+import com.cryptoalgo.backend.repo.AuditLogRepository;
+import com.cryptoalgo.backend.repo.BotRepository;
+import com.cryptoalgo.backend.repo.PositionRepository;
 import com.cryptoalgo.backend.repo.StrategyRepository;
+import com.cryptoalgo.backend.repo.TradeOrderRepository;
 import com.cryptoalgo.backend.security.CurrentUser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,46 +21,65 @@ import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.List;
+import java.util.Comparator;
 import java.util.UUID;
 
 /**
- * Strategy registry. Strategies are exclusively AI-generated through the
- * autonomous pipeline; there is no manual creation or manual approval.
- * Promotion to live happens automatically via the paper-trade gate.
+ * Read-only strategy registry. Strategies are auto-generated for FUTURES;
+ * there is no manual create/generate endpoint.
  */
 @RestController
 @RequestMapping("/api/v1/strategies")
 @Validated
 public class StrategyController {
 
-    public record GenerateRequest(String name, String goal, String timeframe,
-                                  List<String> pairs, String riskProfile) {}
     public record PaperProgress(long closedTrades, long wins, double winRate,
                                 BigDecimal totalPnl, int requiredTrades, double requiredWinRate) {}
     public record StrategyView(UUID id, UUID tenantId, String name, int version, String status,
                                String origin, String sourceCode, JsonNode config, String prompt,
+                               String marketType, String instrument, String marginCurrency,
                                Instant createdAt, PaperProgress paper) {}
 
+    public record StrategyTrade(UUID id, UUID botId, String mode, String pair, String side,
+                                BigDecimal quantity, BigDecimal entryPrice, BigDecimal exitPrice,
+                                String status, BigDecimal realizedPnl, Instant openedAt,
+                                Instant closedAt) {}
+
+    public record StrategyOrder(UUID id, UUID botId, String mode, String pair, String side,
+                                String orderType, String status, BigDecimal price,
+                                BigDecimal quantity, BigDecimal filledQty, String error,
+                                Instant createdAt) {}
+
+    public record LiveSkip(String action, JsonNode details, Instant createdAt) {}
+
     private final StrategyRepository strategies;
-    private final StrategyPipelineService pipeline;
+    private final BotRepository bots;
+    private final PositionRepository positions;
+    private final TradeOrderRepository tradeOrders;
+    private final AuditLogRepository auditLogs;
     private final PaperStatsService paperStats;
     private final ObjectMapper mapper;
     private final AppProperties props;
 
-    public StrategyController(StrategyRepository strategies, StrategyPipelineService pipeline,
-                              PaperStatsService paperStats, ObjectMapper mapper, AppProperties props) {
+    public StrategyController(StrategyRepository strategies, BotRepository bots,
+                              PositionRepository positions, TradeOrderRepository tradeOrders,
+                              AuditLogRepository auditLogs, PaperStatsService paperStats,
+                              ObjectMapper mapper, AppProperties props) {
         this.strategies = strategies;
-        this.pipeline = pipeline;
+        this.bots = bots;
+        this.positions = positions;
+        this.tradeOrders = tradeOrders;
+        this.auditLogs = auditLogs;
         this.paperStats = paperStats;
         this.mapper = mapper;
         this.props = props;
     }
 
     @GetMapping
-    public Flux<StrategyView> list() {
+    public Flux<StrategyView> list(@RequestParam(defaultValue = "FUTURES") String marketType) {
         return CurrentUser.get()
-                .flatMapMany(p -> strategies.findByTenantIdAndUserIdOrderByCreatedAtDesc(p.tenantId(), p.userId()))
+                .flatMapMany(p -> strategies.findByTenantIdAndMarketTypeOrderByCreatedAtDesc(
+                        p.tenantId(), marketType))
                 .concatMap(this::withStats);
     }
 
@@ -65,24 +90,62 @@ public class StrategyController {
                 .flatMap(this::withStats);
     }
 
-    /**
-     * Launch the autonomous pipeline: AI generation (provider failover) ->
-     * auto backtest -> auto paper bot. All inputs optional.
-     */
-    @PostMapping("/generate")
-    public Mono<StrategyView> generate(@RequestBody(required = false) GenerateRequest req) {
-        GenerateRequest r = req == null
-                ? new GenerateRequest(null, null, null, null, null) : req;
-        return CurrentUser.get()
-                .flatMap(p -> pipeline.generate(p, r.name(), r.goal(), r.timeframe(),
-                        r.pairs(), r.riskProfile()))
-                .flatMap(this::withStats);
+    /** Paper + live position history for a strategy (via its bots). */
+    @GetMapping("/{id}/trades")
+    public Flux<StrategyTrade> trades(@PathVariable UUID id,
+                                      @RequestParam(required = false) String mode) {
+        return CurrentUser.get().flatMap(p -> strategies.findByIdAndTenantId(id, p.tenantId()))
+                .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
+                .flatMapMany(s -> bots.findByStrategyId(s.id())
+                        .filter(b -> mode == null || mode.isBlank() || mode.equalsIgnoreCase(b.mode()))
+                        .concatMap(b -> positions.findByBotIdOrderByOpenedAtDesc(b.id())
+                                .map(pos -> toTrade(pos, b.mode()))))
+                .sort(Comparator.comparing(StrategyTrade::openedAt,
+                        Comparator.nullsLast(Comparator.reverseOrder())));
+    }
+
+    /** Paper + live order history for a strategy (includes FAILED live attempts). */
+    @GetMapping("/{id}/orders")
+    public Flux<StrategyOrder> orders(@PathVariable UUID id,
+                                      @RequestParam(required = false) String mode) {
+        return CurrentUser.get().flatMap(p -> strategies.findByIdAndTenantId(id, p.tenantId()))
+                .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
+                .flatMapMany(s -> bots.findByStrategyId(s.id())
+                        .filter(b -> mode == null || mode.isBlank() || mode.equalsIgnoreCase(b.mode()))
+                        .concatMap(b -> tradeOrders.findByBotIdOrderByCreatedAtDesc(b.id())
+                                .map(o -> toOrder(o, b.mode()))))
+                .sort(Comparator.comparing(StrategyOrder::createdAt,
+                        Comparator.nullsLast(Comparator.reverseOrder())));
+    }
+
+    /** Why LIVE promotion was skipped (balance, max bots, bad backtest, etc.). */
+    @GetMapping("/{id}/live-skips")
+    public Flux<LiveSkip> liveSkips(@PathVariable UUID id) {
+        return CurrentUser.get().flatMap(p -> strategies.findByIdAndTenantId(id, p.tenantId()))
+                .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
+                .flatMapMany(s -> auditLogs.findByTenantIdAndEntityTypeAndEntityIdOrderByCreatedAtDesc(
+                                s.tenantId(), "STRATEGY", s.id())
+                        .filter(a -> a.action() != null && a.action().startsWith("AUTO_LIVE_SKIPPED"))
+                        .take(20)
+                        .map(a -> new LiveSkip(a.action(), readJson(a.details()), a.createdAt())));
+    }
+
+    private StrategyTrade toTrade(Position pos, String mode) {
+        return new StrategyTrade(pos.id(), pos.botId(), mode, pos.pair(), pos.side(),
+                pos.quantity(), pos.entryPrice(), pos.exitPrice(), pos.status(),
+                pos.realizedPnl(), pos.openedAt(), pos.closedAt());
+    }
+
+    private StrategyOrder toOrder(TradeOrder o, String mode) {
+        return new StrategyOrder(o.id(), o.botId(), mode, o.pair(), o.side(), o.orderType(),
+                o.status(), o.price(), o.quantity(), o.filledQty(), o.error(), o.createdAt());
     }
 
     private Mono<StrategyView> withStats(Strategy s) {
         return paperStats.forStrategy(s.id())
                 .map(st -> new StrategyView(s.id(), s.tenantId(), s.name(), s.version(), s.status(),
-                        s.origin(), s.sourceCode(), readJson(s.config()), s.prompt(), s.createdAt(),
+                        s.origin(), s.sourceCode(), readJson(s.config()), s.prompt(),
+                        s.marketType(), s.instrument(), s.marginCurrency(), s.createdAt(),
                         new PaperProgress(st.closedTrades(), st.wins(), st.winRate(), st.totalPnl(),
                                 props.pipeline().minPaperTrades(),
                                 props.pipeline().winRateThreshold())));

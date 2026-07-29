@@ -3,21 +3,36 @@ import { motion } from 'motion/react'
 import { useState } from 'react'
 import { currentUser, logout } from '@/lib/api'
 
-const nav = [
-  { to: '/', label: 'Dashboard', icon: '◈' },
-  { to: '/strategies', label: 'Strategy Lab', icon: '⌬' },
-  { to: '/bots', label: 'Bots', icon: '⚙' },
-  { to: '/settings', label: 'API Keys', icon: '🔑' },
+type NavItem = { to: string; label: string; end?: boolean }
+type NavGroup = { label: string; items: NavItem[] }
+
+const top: NavItem[] = [{ to: '/', label: 'Dashboard', end: true }]
+
+const groups: NavGroup[] = [
+  {
+    label: 'Futures',
+    items: [
+      { to: '/futures/strategies', label: 'Strategies' },
+      { to: '/futures/paper', label: 'Paper Trade' },
+    ],
+  },
+  {
+    label: 'Options',
+    items: [
+      { to: '/options/strategies', label: 'Strategies' },
+      { to: '/options/paper', label: 'Paper Trade' },
+    ],
+  },
 ]
 
-const adminNav = [{ to: '/admin', label: 'Admin', icon: '⛨' }]
+const bottom: NavItem[] = [{ to: '/settings', label: 'API Keys' }]
+const adminNav: NavItem[] = [{ to: '/admin', label: 'Admin' }]
 
 export default function Layout() {
   const user = currentUser()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const isAdmin = user?.role === 'SUPER_ADMIN' || user?.role === 'TENANT_ADMIN'
-  const items = isAdmin ? [...nav, ...adminNav] : nav
 
   return (
     <div className="relative min-h-screen">
@@ -25,7 +40,6 @@ export default function Layout() {
       <div className="orb animate-float left-[-10%] top-[-10%] h-96 w-96 bg-cyan-600/50" />
       <div className="orb animate-float-delay right-[-5%] top-[30%] h-80 w-80 bg-emerald-600/40" />
 
-      {/* mobile top bar */}
       <div className="glass sticky top-0 z-40 flex items-center justify-between px-4 py-3 lg:hidden">
         <Brand />
         <button onClick={() => setOpen(!open)} className="rounded-lg border border-edge p-2 text-slate-300">
@@ -36,7 +50,6 @@ export default function Layout() {
       </div>
 
       <div className="relative z-10 flex">
-        {/* sidebar */}
         <motion.aside
           initial={{ x: -40, opacity: 0 }}
           animate={{ x: 0, opacity: 1 }}
@@ -46,31 +59,33 @@ export default function Layout() {
           <div className="hidden lg:block">
             <Brand />
           </div>
-          <nav className="mt-8 flex flex-1 flex-col gap-1.5">
-            {items.map((item, i) => (
-              <motion.div
-                key={item.to}
-                initial={{ opacity: 0, x: -12 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.1 + i * 0.06 }}
-              >
-                <NavLink
-                  to={item.to}
-                  end={item.to === '/'}
-                  onClick={() => setOpen(false)}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm font-medium transition-all duration-200 ${
-                      isActive
-                        ? 'bg-gradient-to-r from-cyan-500/20 to-emerald-500/10 text-cyan-300 shadow-inner'
-                        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
-                    }`
-                  }
-                >
-                  <span className="text-base">{item.icon}</span>
-                  {item.label}
-                </NavLink>
-              </motion.div>
+          <nav className="mt-8 flex flex-1 flex-col gap-4 overflow-y-auto">
+            <div className="flex flex-col gap-1">
+              {top.map((item) => (
+                <SideLink key={item.to} item={item} onClick={() => setOpen(false)} />
+              ))}
+            </div>
+            {groups.map((g) => (
+              <div key={g.label}>
+                <div className="mb-1.5 px-4 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+                  {g.label}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {g.items.map((item) => (
+                    <SideLink key={item.to} item={item} onClick={() => setOpen(false)} />
+                  ))}
+                </div>
+              </div>
             ))}
+            <div className="flex flex-col gap-1">
+              {bottom.map((item) => (
+                <SideLink key={item.to} item={item} onClick={() => setOpen(false)} />
+              ))}
+              {isAdmin &&
+                adminNav.map((item) => (
+                  <SideLink key={item.to} item={item} onClick={() => setOpen(false)} />
+                ))}
+            </div>
           </nav>
           <div className="mt-auto border-t border-edge pt-4">
             <div className="truncate text-sm font-medium text-slate-200">{user?.displayName ?? user?.email}</div>
@@ -97,6 +112,25 @@ export default function Layout() {
   )
 }
 
+function SideLink({ item, onClick }: { item: NavItem; onClick: () => void }) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      onClick={onClick}
+      className={({ isActive }) =>
+        `rounded-xl px-4 py-2 text-sm font-medium transition-all duration-200 ${
+          isActive
+            ? 'bg-gradient-to-r from-cyan-500/20 to-emerald-500/10 text-cyan-300 shadow-inner'
+            : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+        }`
+      }
+    >
+      {item.label}
+    </NavLink>
+  )
+}
+
 function Brand() {
   return (
     <div className="flex items-center gap-2.5">
@@ -107,7 +141,7 @@ function Brand() {
         <div className="font-[family-name:var(--font-display)] text-lg font-bold leading-none text-slate-100">
           Quant<span className="gradient-text">DCX</span>
         </div>
-        <div className="text-[10px] uppercase tracking-widest text-slate-500">AI Trading</div>
+        <div className="text-[10px] uppercase tracking-widest text-slate-500">INR Futures</div>
       </div>
     </div>
   )

@@ -12,4 +12,5 @@ public record Position(@Id UUID id, UUID tenantId, UUID userId, UUID botId, Stri
                        String side, BigDecimal quantity, BigDecimal entryPrice, BigDecimal exitPrice,
                        BigDecimal leverage, String status, BigDecimal realizedPnl,
                        BigDecimal slPrice, BigDecimal targetPrice, String slOrderId,
+                       String marginCurrency,
                        Instant openedAt, Instant closedAt) {}

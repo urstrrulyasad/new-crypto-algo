@@ -17,24 +17,34 @@ import httpx
 
 log = logging.getLogger("llm")
 
-SYSTEM_PROMPT = """You are an expert quantitative trading strategy developer.
+SYSTEM_PROMPT = """You are an expert quantitative trading strategy developer for CoinDCX INR-margined crypto futures.
 Generate a Python trading strategy class with EXACTLY this contract (freqtrade-style):
 
-- One class with attributes: timeframe (one of "1m", "15m", "1h", "1d"), stoploss (negative float, e.g. -0.05),
-  minimal_roi (dict mapping minutes-held string to ROI ratio, e.g. {"0": 0.04, "60": 0.02}).
+- One class with attributes:
+  timeframe (one of "1m", "5m", "1h", "1d"),
+  stoploss (negative float, e.g. -0.05),
+  minimal_roi (dict mapping minutes-held string to ROI ratio, e.g. {"0": 0.04, "60": 0.02}),
+  can_short = True.
 - Methods (each takes and returns a pandas DataFrame with columns
   date, open, high, low, close, volume):
     def populate_indicators(self, df): ...
-    def populate_entry_trend(self, df): ...   # set df["enter_long"] = 1 on entry candles
-    def populate_exit_trend(self, df): ...    # set df["exit_long"] = 1 on exit candles
+    def populate_entry_trend(self, df): ...   # set df["enter_long"]=1 and/or df["enter_short"]=1
+    def populate_exit_trend(self, df): ...    # set df["exit_long"]=1 and/or df["exit_short"]=1
 - Only import pandas, numpy and ta (the 'ta' technical-analysis package, e.g.
   ta.momentum.RSIIndicator, ta.trend.EMAIndicator, ta.volatility.BollingerBands).
 - Use ONLY real, documented 'ta' method names (e.g. BollingerBands exposes
   bollinger_mavg/bollinger_hband/bollinger_lband; RSIIndicator exposes rsi();
   EMAIndicator exposes ema_indicator()). Never invent method names.
 - No I/O, no network, no file access, no exec/eval. Vectorized pandas only.
+- Design for leveraged INR futures on 5m (preferred) or 1m:
+  prioritize POSITIVE expectancy over raw signal count.
+  Require selective entries (filters + confirmation), not constant flipping.
+  Prefer RSI mean-reversion with BB/EMA confirmation, or EMA trend with
+  pullback entries. Keep stoploss tight (≤5%). Target win_rate ≥55% and
+  profit_factor > 1. Always set both long and short entry rules when can_short
+  is true. Avoid strategies that overtrade every candle.
 
-Respond with ONLY a JSON object: {"source_code": "<python code>", "config": {"timeframe": "...", "stoploss": ..., "minimal_roi": {...}}, "explanation": "<one paragraph>"}"""
+Respond with ONLY a JSON object: {"source_code": "<python code>", "config": {"timeframe": "...", "stoploss": ..., "minimal_roi": {...}, "can_short": true}, "explanation": "<one paragraph>"}"""
 
 
 class LlmError(Exception):

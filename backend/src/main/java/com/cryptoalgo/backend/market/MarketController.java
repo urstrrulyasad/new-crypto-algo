@@ -1,5 +1,6 @@
 package com.cryptoalgo.backend.market;
 
+import com.cryptoalgo.backend.trading.CoinDcxFuturesClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.MediaType;
@@ -9,6 +10,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Map;
 
 /** Public market data for charts: candles, markets, live ticker stream (SSE). */
 @RestController
@@ -18,11 +20,14 @@ public class MarketController {
     private final CandleService candles;
     private final TickerService ticker;
     private final CoinDcxPublicClient client;
+    private final CoinDcxFuturesClient futures;
 
-    public MarketController(CandleService candles, TickerService ticker, CoinDcxPublicClient client) {
+    public MarketController(CandleService candles, TickerService ticker, CoinDcxPublicClient client,
+                            CoinDcxFuturesClient futures) {
         this.candles = candles;
         this.ticker = ticker;
         this.client = client;
+        this.futures = futures;
     }
 
     @GetMapping("/candles")
@@ -30,13 +35,29 @@ public class MarketController {
                                               @RequestParam(defaultValue = "1h") String timeframe,
                                               @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
                                               @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
-                                              @RequestParam(defaultValue = "2000") int limit) {
+                                              @RequestParam(defaultValue = "2000") int limit,
+                                              @RequestParam(defaultValue = "SPOT") String marketType) {
+        if ("FUTURES".equalsIgnoreCase(marketType)) {
+            String resolution = CoinDcxFuturesClient.toFuturesResolution(timeframe);
+            return futures.candles(pair, resolution, from, to).take(Math.min(limit, 10_000));
+        }
         return candles.get(pair, timeframe, from, to, Math.min(limit, 10_000));
     }
 
     @GetMapping("/markets")
     public Mono<JsonNode> markets() {
         return client.marketDetails();
+    }
+
+    /** Active INR-margined futures instruments (on demand, no cache). */
+    @GetMapping("/futures/instruments")
+    public Mono<Map<String, Object>> futuresInstruments(
+            @RequestParam(defaultValue = "INR") String marginCurrency) {
+        return futures.activeInstruments(marginCurrency)
+                .map(list -> Map.of(
+                        "marginCurrency", marginCurrency,
+                        "count", list.size(),
+                        "instruments", list));
     }
 
     @GetMapping("/ticker")

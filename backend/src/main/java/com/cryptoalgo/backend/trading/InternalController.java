@@ -12,19 +12,14 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
-/**
- * Internal API for the Python strategy engine: which strategies must be
- * evaluated live (i.e. have at least one RUNNING bot) and on which pairs.
- */
 @RestController
 @RequestMapping("/api/v1/internal")
 public class InternalController {
 
     public record ActiveStrategy(UUID tenantId, UUID strategyId, String sourceCode,
-                                 String timeframe, List<String> pairs) {}
+                                 String timeframe, List<String> pairs, String marketType) {}
 
     private final AppProperties props;
     private final BotRepository bots;
@@ -45,23 +40,27 @@ public class InternalController {
             return Flux.error(ApiException.unauthorized("Bad internal token"));
         return bots.findByStatus("RUNNING")
                 .filter(bot -> !bot.killSwitch())
+                .filter(bot -> "FUTURES".equals(bot.marketType()))
                 .groupBy(bot -> bot.strategyId())
                 .flatMap(group -> group.collectList()
                         .flatMap(botList -> strategies.findById(group.key())
+                                .filter(s -> "FUTURES".equals(s.marketType()))
+                                .filter(s -> !"ARCHIVED".equals(s.status()) && !"REJECTED".equals(s.status()))
                                 .map(strategy -> {
                                     var pairs = new java.util.LinkedHashSet<String>();
                                     String timeframe = "1h";
                                     for (var bot : botList) {
                                         pairs.addAll(readPairs(bot.pairs()));
                                     }
+                                    if (strategy.instrument() != null) pairs.add(strategy.instrument());
                                     try {
                                         var cfg = mapper.readTree(strategy.config().asString());
                                         if (cfg.hasNonNull("timeframe")) timeframe = cfg.get("timeframe").asText();
                                     } catch (Exception ignored) {
-                                        // config is stored as validated JSON; fall back to default timeframe
                                     }
                                     return new ActiveStrategy(strategy.tenantId(), strategy.id(),
-                                            strategy.sourceCode(), timeframe, List.copyOf(pairs));
+                                            strategy.sourceCode(), timeframe, List.copyOf(pairs),
+                                            "FUTURES");
                                 })));
     }
 

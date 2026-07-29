@@ -6,10 +6,9 @@ import com.cryptoalgo.backend.config.AppProperties;
 import com.cryptoalgo.backend.domain.Backtest;
 import com.cryptoalgo.backend.domain.Bot;
 import com.cryptoalgo.backend.domain.Strategy;
-import com.cryptoalgo.backend.market.CandleService;
 import com.cryptoalgo.backend.repo.BacktestRepository;
 import com.cryptoalgo.backend.repo.StrategyRepository;
-import com.cryptoalgo.backend.security.AuthPrincipal;
+import com.cryptoalgo.backend.trading.CoinDcxFuturesClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.postgresql.codec.Json;
@@ -23,19 +22,12 @@ import reactor.core.scheduler.Schedulers;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
- * The autonomous strategy pipeline. One call runs the whole flow:
- *
- *   AI generation (with model/provider rate-limit failover, live candles in
- *   the prompt) -> validation -> automatic backtest -> automatic paper bot.
- *
- * The paper-trade gate ({@link PaperEvaluationService}) later promotes the
- * strategy to live trading once it proves itself. There is no manual path.
+ * Futures-only autonomous pipeline: generate → backtest gate → paper bot.
  */
 @Service
 public class StrategyPipelineService {
@@ -44,7 +36,7 @@ public class StrategyPipelineService {
 
     private final AiChainService aiChain;
     private final StrategyEngineClient engine;
-    private final CandleService candles;
+    private final CoinDcxFuturesClient futures;
     private final StrategyRepository strategies;
     private final BacktestRepository backtests;
     private final R2dbcEntityTemplate template;
@@ -53,12 +45,12 @@ public class StrategyPipelineService {
     private final AppProperties props;
 
     public StrategyPipelineService(AiChainService aiChain, StrategyEngineClient engine,
-                                   CandleService candles, StrategyRepository strategies,
+                                   CoinDcxFuturesClient futures, StrategyRepository strategies,
                                    BacktestRepository backtests, R2dbcEntityTemplate template,
                                    ObjectMapper mapper, AuditService audit, AppProperties props) {
         this.aiChain = aiChain;
         this.engine = engine;
-        this.candles = candles;
+        this.futures = futures;
         this.strategies = strategies;
         this.backtests = backtests;
         this.template = template;
@@ -67,34 +59,28 @@ public class StrategyPipelineService {
         this.props = props;
     }
 
-    /**
-     * Generates a strategy through the provider failover chain and kicks off
-     * the automatic backtest + paper bot in the background. Returns as soon as
-     * the strategy row exists (status GENERATED or REJECTED).
-     */
-    public Mono<Strategy> generate(AuthPrincipal p, String name, String goal, String timeframe,
-                                   List<String> pairs, String riskProfile) {
-        List<String> effPairs = pairs == null || pairs.isEmpty() ? List.of("B-BTC_USDT") : pairs;
-        String effTimeframe = normalizeTimeframe(timeframe == null || timeframe.isBlank() ? "1h" : timeframe);
-        String effGoal = goal == null || goal.isBlank()
-                ? "Generate a consistently profitable trend/momentum strategy with strict risk control."
-                : goal;
-        String effRisk = riskProfile == null || riskProfile.isBlank() ? "balanced" : riskProfile;
-        String effName = name == null || name.isBlank()
-                ? "AI " + effPairs.get(0) + " " + DateTimeFormatter.ofPattern("MMdd-HHmm")
-                        .format(Instant.now().atZone(java.time.ZoneOffset.UTC))
-                : name;
+    /** Auto-generate a FUTURES strategy for one INR instrument. */
+    public Mono<Strategy> generateFutures(UUID tenantId, UUID userId, String instrument) {
+        // 5m: enough signal density for paper fills, better AI backtest quality than 1m noise.
+        String timeframe = "5m";
+        String goal = "INR-margined CoinDCX futures strategy for " + instrument
+                + ". Long and short with strict risk. Prefer high win-rate mean-reversion or "
+                + "trend-following with clear filters. Target profit_factor > 1.2, win_rate > 55%, "
+                + "positive total profit, max drawdown under 35%. Avoid overtrading. Timeframe 5m.";
+        String name = "FUT " + instrument;
+        List<String> pairs = List.of(instrument);
 
-        return aiChain.chain(p.tenantId()).flatMap(chain ->
-                candles.recentCsv(effPairs.get(0), effTimeframe, 100)
+        return aiChain.chain(tenantId).flatMap(chain ->
+                futures.recentCsv(instrument, CoinDcxFuturesClient.toFuturesResolution(timeframe), 100)
                         .onErrorReturn("")
                         .flatMap(csv -> {
                             Map<String, Object> engineReq = new java.util.HashMap<>();
                             engineReq.put("providers", chain.chain());
-                            engineReq.put("goal", effGoal);
-                            engineReq.put("timeframe", effTimeframe);
-                            engineReq.put("pairs", effPairs);
-                            engineReq.put("risk_profile", effRisk);
+                            engineReq.put("goal", goal);
+                            engineReq.put("timeframe", timeframe);
+                            engineReq.put("pairs", pairs);
+                            engineReq.put("risk_profile", "balanced");
+                            engineReq.put("market_type", "FUTURES");
                             if (!csv.isBlank()) engineReq.put("market_data", csv);
                             return engine.generateStrategy(engineReq);
                         })
@@ -103,32 +89,37 @@ public class StrategyPipelineService {
                             String providerUsed = result.path("provider_used").asText(null);
                             UUID providerId = providerUsed == null ? null
                                     : chain.providerIds().get(providerUsed);
-                            JsonNode config = enrich(result.path("config"), effTimeframe, effPairs,
+                            JsonNode config = enrich(result.path("config"), timeframe, pairs,
                                     result.path("model_used").asText(null), providerUsed,
                                     valid ? null : result.path("errors"));
-                            Strategy s = new Strategy(UUID.randomUUID(), p.tenantId(), p.userId(),
-                                    effName, 1, null, result.path("source_code").asText(""),
+                            Strategy s = new Strategy(UUID.randomUUID(), tenantId, userId,
+                                    name, 1, null, result.path("source_code").asText(""),
                                     Json.of(config.toString()), valid ? "GENERATED" : "REJECTED",
-                                    "AI_GENERATED", providerId, effGoal, Instant.now());
+                                    "AI_GENERATED", providerId, goal,
+                                    "FUTURES", instrument, "INR", Instant.now());
                             return template.insert(s)
-                                    .then(audit.record(p.tenantId(), p.userId(),
+                                    .then(audit.record(tenantId, userId,
                                             valid ? "STRATEGY_GENERATED" : "STRATEGY_REJECTED",
                                             "STRATEGY", s.id(),
-                                            Map.of("provider", providerUsed == null ? "?" : providerUsed,
-                                                    "model", result.path("model_used").asText("?"))))
+                                            Map.of("instrument", instrument,
+                                                    "provider", providerUsed == null ? "?" : providerUsed)))
                                     .thenReturn(s)
                                     .doOnSuccess(saved -> {
-                                        if (valid) continuePipeline(saved, effPairs, effTimeframe);
+                                        if (valid) continuePipeline(saved);
                                     });
                         }));
     }
 
-    /** Async: backtest, then auto-create + start the paper bot. */
-    private void continuePipeline(Strategy strategy, List<String> pairs, String timeframe) {
+    private void continuePipeline(Strategy strategy) {
+        String instrument = strategy.instrument();
+        List<String> pairs = List.of(instrument);
+        String timeframe = CoinDcxFuturesClient.normalizeFuturesTimeframe(
+                readTimeframe(strategy.config()));
         Instant end = Instant.now();
         Instant start = end.minus(Duration.ofDays(props.pipeline().backtestDays()));
         Backtest bt = new Backtest(UUID.randomUUID(), strategy.tenantId(), strategy.id(),
                 timeframe, toJson(pairs), start, end, "RUNNING", null, null, null, Instant.now(), null);
+        int leverage = props.pipeline().futuresLeverage();
 
         template.insert(bt)
                 .flatMap(saved -> engine.runBacktest(Map.of(
@@ -136,72 +127,129 @@ public class StrategyPipelineService {
                                 "pairs", pairs,
                                 "timeframe", timeframe,
                                 "start", start.toString(),
-                                "end", end.toString()))
-                        .flatMap(result -> backtests.save(new Backtest(saved.id(), saved.tenantId(),
-                                saved.strategyId(), saved.timeframe(), saved.pairs(),
-                                saved.rangeStart(), saved.rangeEnd(), "DONE",
-                                Json.of(result.path("metrics").toString()),
-                                Json.of(result.path("trades").toString()),
-                                null, saved.createdAt(), Instant.now())))
-                        .onErrorResume(e -> {
-                            log.warn("Auto-backtest for strategy {} failed: {}", strategy.id(), e.getMessage());
+                                "end", end.toString(),
+                                "stake", props.pipeline().paperStake(),
+                                "leverage", leverage,
+                                "market_type", "FUTURES"))
+                        .flatMap(result -> {
+                            JsonNode metrics = result.path("metrics");
+                            boolean pass = passesBacktestGate(metrics);
                             return backtests.save(new Backtest(saved.id(), saved.tenantId(),
-                                    saved.strategyId(), saved.timeframe(), saved.pairs(),
-                                    saved.rangeStart(), saved.rangeEnd(), "FAILED",
-                                    null, null, e.getMessage(), saved.createdAt(), Instant.now()));
+                                            saved.strategyId(), saved.timeframe(), saved.pairs(),
+                                            saved.rangeStart(), saved.rangeEnd(), "DONE",
+                                            Json.of(metrics.toString()),
+                                            Json.of(result.path("trades").toString()),
+                                            null, saved.createdAt(), Instant.now()))
+                                    .then(Mono.just(pass));
+                        })
+                        .onErrorResume(e -> {
+                            log.warn("Auto-backtest for {} failed: {}", strategy.id(), e.getMessage());
+                            return backtests.save(new Backtest(saved.id(), saved.tenantId(),
+                                            saved.strategyId(), saved.timeframe(), saved.pairs(),
+                                            saved.rangeStart(), saved.rangeEnd(), "FAILED",
+                                            null, null, e.getMessage(), saved.createdAt(), Instant.now()))
+                                    .thenReturn(false);
                         }))
-                .then(setStatus(strategy.id(), "BACKTESTED"))
-                .then(startPaperBot(strategy, pairs))
-                .then(setStatus(strategy.id(), "PAPER_TRADING"))
-                .then(audit.record(strategy.tenantId(), strategy.userId(), "PAPER_TRADING_STARTED",
-                        "STRATEGY", strategy.id(), Map.of("pairs", pairs.toString())))
+                .flatMap(pass -> {
+                    if (!pass) {
+                        return setStatus(strategy.id(), "REJECTED")
+                                .then(audit.record(strategy.tenantId(), strategy.userId(),
+                                        "STRATEGY_BACKTEST_GATE_FAILED", "STRATEGY", strategy.id(), Map.of(
+                                                "instrument", instrument,
+                                                "reason", "backtest quality gate")));
+                    }
+                    return setStatus(strategy.id(), "BACKTESTED")
+                            .then(startPaperBot(strategy, pairs))
+                            .then(setStatus(strategy.id(), "PAPER_TRADING"))
+                            .then(audit.record(strategy.tenantId(), strategy.userId(),
+                                    "PAPER_TRADING_STARTED", "STRATEGY", strategy.id(),
+                                    Map.of("instrument", instrument)));
+                })
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(
-                        v -> log.info("Pipeline for strategy {} reached PAPER_TRADING", strategy.id()),
-                        e -> log.error("Pipeline for strategy {} failed", strategy.id(), e));
+                        v -> log.info("Pipeline for {} finished", strategy.id()),
+                        e -> log.error("Pipeline for {} failed", strategy.id(), e));
+    }
+
+    private boolean passesBacktestGate(JsonNode metrics) {
+        // Paper entry is a smoke screen: enough trades and non-catastrophic DD.
+        // LIVE promotion re-checks quality metrics + 75% paper win-rate.
+        int trades = metrics.path("trades").asInt(0);
+        double maxDd = metrics.path("max_drawdown_pct").asDouble(100);
+        boolean pass = trades >= props.pipeline().minBacktestTrades()
+                && maxDd <= props.pipeline().maxBacktestDrawdownPct();
+        if (!pass) {
+            log.info("Backtest smoke gate FAIL trades={} dd={} (need trades>={} dd<={})",
+                    trades, maxDd,
+                    props.pipeline().minBacktestTrades(),
+                    props.pipeline().maxBacktestDrawdownPct());
+        }
+        return pass;
+    }
+
+    /** Stricter quality check used before LIVE promotion. */
+    public boolean passesLiveBacktestQuality(JsonNode metrics) {
+        int trades = metrics.path("trades").asInt(0);
+        double maxDd = metrics.path("max_drawdown_pct").asDouble(100);
+        double winRate = metrics.path("win_rate").asDouble(0);
+        double profitPct = metrics.path("profit_total_pct").asDouble(-100);
+        double profitFactor = metrics.path("profit_factor").asDouble(0);
+        boolean pass = trades >= props.pipeline().minBacktestTrades()
+                && maxDd <= props.pipeline().maxBacktestDrawdownPct()
+                && winRate >= props.pipeline().minBacktestWinRate()
+                && profitPct >= props.pipeline().minBacktestProfitPct()
+                && profitFactor >= props.pipeline().minBacktestProfitFactor();
+        if (!pass) {
+            log.info("LIVE backtest quality FAIL trades={} wr={} profit={} pf={} dd={}",
+                    trades, winRate, profitPct, profitFactor, maxDd);
+        }
+        return pass;
     }
 
     private Mono<Bot> startPaperBot(Strategy strategy, List<String> pairs) {
         Bot bot = new Bot(UUID.randomUUID(), strategy.tenantId(), strategy.userId(), strategy.id(),
-                null, strategy.name() + " · paper", "PAPER", "SPOT", toJson(pairs), "USDT",
+                null, strategy.name() + " · paper", "PAPER", "FUTURES", toJson(pairs), "INR",
                 props.pipeline().paperStake(), props.pipeline().maxOpenTrades(),
-                BigDecimal.ONE, "RUNNING", false, Instant.now(), Instant.now());
+                BigDecimal.valueOf(props.pipeline().futuresLeverage()), "RUNNING", false,
+                "INR", Instant.now(), Instant.now());
         return template.insert(bot);
     }
 
     private Mono<Void> setStatus(UUID strategyId, String status) {
         return strategies.findById(strategyId)
-                .flatMap(s -> strategies.save(new Strategy(s.id(), s.tenantId(), s.userId(), s.name(),
-                        s.version(), s.parentId(), s.sourceCode(), s.config(), status, s.origin(),
-                        s.aiProviderId(), s.prompt(), s.createdAt())))
+                .flatMap(s -> strategies.save(copy(s, status)))
                 .then();
     }
 
-    /** Fold generation metadata into the stored config so the UI can show it. */
+    static Strategy copy(Strategy s, String status) {
+        return new Strategy(s.id(), s.tenantId(), s.userId(), s.name(), s.version(), s.parentId(),
+                s.sourceCode(), s.config(), status, s.origin(), s.aiProviderId(), s.prompt(),
+                s.marketType(), s.instrument(), s.marginCurrency(), s.createdAt());
+    }
+
+    private String readTimeframe(Json config) {
+        try {
+            JsonNode n = mapper.readTree(config.asString());
+            return n.path("timeframe").asText("1h");
+        } catch (Exception e) {
+            return "1h";
+        }
+    }
+
     private JsonNode enrich(JsonNode config, String timeframe, List<String> pairs,
                             String model, String provider, JsonNode errors) {
         var node = config != null && config.isObject()
                 ? (com.fasterxml.jackson.databind.node.ObjectNode) config.deepCopy()
                 : mapper.createObjectNode();
-        // force the timeframe onto CoinDCX's supported set even if the LLM drifted
-        node.put("timeframe", normalizeTimeframe(
+        node.put("timeframe", CoinDcxFuturesClient.normalizeFuturesTimeframe(
                 node.hasNonNull("timeframe") ? node.get("timeframe").asText() : timeframe));
         node.set("pairs", mapper.valueToTree(pairs));
+        node.put("market_type", "FUTURES");
+        node.put("margin_currency", "INR");
         if (provider != null) node.put("provider_used", provider);
         if (model != null) node.put("model_used", model);
         if (errors != null && !errors.isMissingNode()) node.set("generation_errors", errors);
         return node;
-    }
-
-    /** CoinDCX public candles only serve 1m/15m/1h/1d; coerce anything else. */
-    static String normalizeTimeframe(String tf) {
-        return switch (tf) {
-            case "1m", "15m", "1h", "1d" -> tf;
-            case "3m", "5m" -> "1m";
-            case "10m", "30m" -> "15m";
-            case "2h", "4h", "6h", "8h", "12h" -> "1h";
-            default -> tf.endsWith("d") || tf.endsWith("w") || tf.endsWith("M") ? "1d" : "1h";
-        };
     }
 
     private Json toJson(Object value) {

@@ -1,10 +1,12 @@
 # QuantDCX — Autonomous Multi-Tenant AI Crypto Trading Platform
 
-Fully autonomous strategy pipeline on real CoinDCX market data:
+Fully autonomous strategy pipeline on real CoinDCX **INR futures** market data:
 
-**AI generates a strategy → validates + smoke-tests it on live candles → auto-backtests →
-auto-starts a paper bot → after ≥ 10 closed paper trades at ≥ 75% win rate it is
-auto-approved and a live bot starts trading real funds with stop-loss and target on every order.**
+**AI generates a strategy → validates + smoke-tests on live candles → auto-backtests →
+auto-starts a paper bot (fills at live CoinDCX futures price) → after ≥ 10 closed paper
+trades at ≥ 75% win rate **and** a quality backtest → LIVE bot starts on **INR** margin only.**
+
+Dashboard = LIVE money only (CoinDCX INR wallet + LIVE PnL/trades). Paper stays on Strategies.
 
 There is no manual strategy creation and no manual approval — the pipeline does everything.
 
@@ -14,7 +16,7 @@ There is no manual strategy creation and no manual approval — the pipeline doe
 |---|---|---|
 | `backend/` | Java 21, Spring Boot 3.5, WebFlux, R2DBC, Flyway | Multi-tenant API: JWT auth, RBAC (Super Admin / Tenant Admin / Trader), AES-256-GCM-encrypted CoinDCX keys (user level) and AI provider keys (admin level), strategy pipeline orchestration, execution engine (paper + live), position guard (SL/target), paper-trade gate, portfolio, audit |
 | `strategy-engine/` | Python 3.11, FastAPI, pandas, ta | LLM strategy generation with **model → provider rate-limit failover**, AST-sandbox validation + runtime smoke test on live candles (with self-correcting retry), backtesting on real CoinDCX candles, live signal runner |
-| `frontend/` | React 19, TypeScript, Tailwind v4, Motion, Lightweight Charts | Animated responsive UI: dashboard with live SSE tickers, AI pipeline dashboard with progress gates, bots, admin panel, key management |
+| `frontend/` | React 19, TypeScript, Tailwind v4, Motion, Lightweight Charts | LIVE Dashboard (CoinDCX INR wallet), Strategies (paper @ market price + LIVE skip reasons), Paper Trade, admin, keys |
 | PostgreSQL | schema `quantdcx`, versioned by Flyway | All state; every business row carries `tenant_id`. **No candle data is stored** — market data is fetched live and passed straight to the AI |
 
 ### AI providers (free tier, key-only setup)
@@ -35,21 +37,21 @@ falls through to the next configured provider. Generation only fails when the wh
 ### Pipeline flow
 
 ```
-Generate (UI, all fields optional)
+Auto scheduler (top INR futures instruments)
   └─ LLM failover chain, live candles in the prompt
-      └─ AST validation + runtime smoke test (self-correcting retry, max 3 attempts)
+      └─ AST validation + runtime smoke test (self-correcting retry)
           └─ Strategy saved: GENERATED
-              └─ Auto backtest (30 days, real candles) → BACKTESTED
-                  └─ Auto paper bot starts → PAPER_TRADING
-                      └─ Gate: ≥ 10 closed paper trades AND ≥ 75% win rate
-                          └─ LIVE_APPROVED: paper bot stops, live bot starts
-                              (sized by available funds, SL resting on the exchange,
-                               target watched by the position guard)
+              └─ Auto backtest (real CoinDCX candles) → BACKTESTED
+                  └─ Auto paper bot → PAPER_TRADING (fill @ CoinDCX live futures price)
+                      └─ Gate: ≥ 10 paper trades @ ≥ 75% WR + quality backtest
+                          └─ LIVE_APPROVED: INR-only wallet, min-notional preflight,
+                             Dashboard shows LIVE money only
 ```
 
 Every entry (paper and live) stores `sl_price` / `target_price` derived from the strategy's
-`stoploss` / `minimal_roi`. Live entries place an exchange-side `stop_limit` stop-loss leg
-(CoinDCX spot has no OCO); the position guard watches the target and paper SL/target.
+`stoploss` / `minimal_roi`. Paper FUTURES fills use CoinDCX live last/mark (skip if missing).
+LIVE futures require funded **INR** futures wallet — no USDT fallback. Undersized orders are
+blocked locally (FAILED order + skip reason), not POSTed undersized to CoinDCX.
 
 > CoinDCX's public candle API only serves the `1m`, `15m`, `1h`, `1d` intervals; every other
 > timeframe is normalized to the nearest supported one.
@@ -115,9 +117,8 @@ Open http://localhost:5173 and log in with `admin@platform.local` / `ChangeMe123
 
 ### 6. Run the pipeline
 
-**Strategy Lab → Generate strategy** (every field optional) → watch the pipeline card:
-GENERATED → BACKTESTED → PAPER TRADING with a live `x/10 trades · y% wins` progress bar.
-When the gate passes, the strategy flips to LIVE APPROVED and a live bot starts automatically.
+Strategies are auto-generated — open **Futures Strategies** and wait for the scheduler.
+Paper progress and LIVE skip reasons show there. **Dashboard** shows CoinDCX INR + LIVE only.
 
 ### Docker alternative
 
@@ -135,7 +136,9 @@ docker compose up --build
 | `PIPELINE_MIN_PAPER_TRADES` | `10` | Closed paper trades required before the live gate |
 | `PIPELINE_WIN_RATE_THRESHOLD` | `0.75` | Win rate required for auto-promotion to live |
 | `PIPELINE_BACKTEST_DAYS` | `30` | Auto-backtest lookback |
-| `PIPELINE_PAPER_STAKE` | `1000` | Paper bot stake (USDT) |
+| `PIPELINE_PAPER_STAKE` | `1000` | Paper bot stake (INR) |
+| `PIPELINE_MAX_LIVE_BOTS` | `10` | Max concurrent LIVE futures bots |
+| `PIPELINE_MAX_WALLET_PCT` | `0.5` | Max fraction of INR futures wallet across LIVE |
 | `PIPELINE_MAX_OPEN_TRADES` | `3` | Auto-created bot max concurrent positions |
 | `PIPELINE_DEFAULT_STOPLOSS` | `-0.05` | Fallback stop-loss when the AI config omits it |
 | `PIPELINE_DEFAULT_TARGET_ROI` | `0.04` | Fallback target when the AI config omits it |
@@ -154,8 +157,8 @@ docker compose up --build
 
 ## Caveats
 
-- Live promotion is **fully automatic** by design (product decision): once a strategy passes
-  the paper gate it trades real funds with the owner's CoinDCX key. Keep the kill switch handy.
-- Spot only for live orders (long-only); shorts are ignored on spot bots.
-- A 75% win-rate gate is deliberately hard — most generated strategies will keep paper trading
-  indefinitely. Tune `PIPELINE_WIN_RATE_THRESHOLD` / `PIPELINE_MIN_PAPER_TRADES` to taste.
+- Live promotion is **fully automatic** by design: once gates pass, LIVE trades real INR
+  futures margin with the owner's CoinDCX key. Keep Stop all futures handy.
+- LIVE margin is **INR only** — empty INR wallet blocks promotion (no silent USDT fallback).
+- Paper fills use CoinDCX futures market price; Dashboard never treats paper as account money.
+- A 75% win-rate gate is deliberately hard — most strategies stay on paper. Tune env knobs.

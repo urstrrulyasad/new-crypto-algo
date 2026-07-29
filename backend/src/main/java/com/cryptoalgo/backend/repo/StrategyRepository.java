@@ -5,10 +5,14 @@ import org.springframework.data.repository.reactive.ReactiveCrudRepository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Collection;
 import java.util.UUID;
 
 public interface StrategyRepository extends ReactiveCrudRepository<Strategy, UUID> {
     Flux<Strategy> findByTenantIdAndUserIdOrderByCreatedAtDesc(UUID tenantId, UUID userId);
     Mono<Strategy> findByIdAndTenantId(UUID id, UUID tenantId);
     Flux<Strategy> findByStatus(String status);
+    Flux<Strategy> findByTenantIdAndMarketTypeOrderByCreatedAtDesc(UUID tenantId, String marketType);
+    Flux<Strategy> findByTenantIdAndMarketType(UUID tenantId, String marketType);
+    Mono<Long> countByTenantIdAndMarketTypeAndStatus(UUID tenantId, String marketType, String status);
 }

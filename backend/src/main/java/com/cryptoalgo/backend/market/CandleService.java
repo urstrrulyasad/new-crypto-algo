@@ -10,11 +10,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Live candle access: fetches CoinDCX candles on demand (nothing is persisted)
- * with a short in-memory TTL cache to absorb repeated chart requests.
+ * Live candle access: fetches CoinDCX candles on demand. Nothing is persisted
+ * and nothing is cached in memory — every call hits the exchange.
  */
 @Service
 public class CandleService {
@@ -22,35 +21,19 @@ public class CandleService {
     public record Candle(Instant ts, BigDecimal open, BigDecimal high, BigDecimal low,
                          BigDecimal close, BigDecimal volume) {}
 
-    private record CacheEntry(List<Candle> candles, long expiresAtMs) {}
-
-    private static final long TTL_MS = 30_000;
-    private static final int MAX_ENTRIES = 500;
-
     private final CoinDcxPublicClient client;
-    private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
 
     public CandleService(CoinDcxPublicClient client) {
         this.client = client;
     }
 
-    /** Candles for a range, ascending by time, straight from CoinDCX (cached briefly). */
     public Flux<Candle> get(String pair, String timeframe, Instant from, Instant to, int limit) {
-        String key = pair + "|" + timeframe + "|" + bucket(from) + "|" + bucket(to) + "|" + limit;
-        CacheEntry hit = cache.get(key);
-        long now = System.currentTimeMillis();
-        if (hit != null && hit.expiresAtMs() > now) return Flux.fromIterable(hit.candles());
         return client.candles(pair, timeframe, from.toEpochMilli(), to.toEpochMilli(),
                         Math.min(limit, 1000))
                 .map(this::parse)
-                .doOnNext(candles -> {
-                    if (cache.size() >= MAX_ENTRIES) cache.clear();
-                    cache.put(key, new CacheEntry(candles, System.currentTimeMillis() + TTL_MS));
-                })
                 .flatMapMany(Flux::fromIterable);
     }
 
-    /** Recent candles as compact CSV (date,open,high,low,close,volume) for LLM prompts. */
     public Mono<String> recentCsv(String pair, String timeframe, int count) {
         long tfMs = timeframeMillis(timeframe);
         long now = System.currentTimeMillis();
@@ -84,11 +67,6 @@ public class CandleService {
         }
         out.sort(Comparator.comparing(Candle::ts));
         return out;
-    }
-
-    /** Bucket range boundaries to 30s so near-identical chart requests share a cache slot. */
-    private static long bucket(Instant t) {
-        return t.toEpochMilli() / TTL_MS;
     }
 
     static long timeframeMillis(String tf) {

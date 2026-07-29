@@ -4,7 +4,6 @@ import com.cryptoalgo.backend.common.AuditService;
 import com.cryptoalgo.backend.common.SecretCrypto;
 import com.cryptoalgo.backend.config.AppProperties;
 import com.cryptoalgo.backend.domain.Bot;
-import com.cryptoalgo.backend.domain.ExchangeKey;
 import com.cryptoalgo.backend.domain.Position;
 import com.cryptoalgo.backend.domain.Signal;
 import com.cryptoalgo.backend.domain.TradeOrder;
@@ -54,6 +53,7 @@ public class ExecutionService {
     private final ExchangeKeyRepository keys;
     private final StrategyRepository strategies;
     private final CoinDcxTradeClient trade;
+    private final CoinDcxFuturesClient futuresClient;
     private final TickerService ticker;
     private final MarketRulesService rules;
     private final SecretCrypto crypto;
@@ -64,8 +64,8 @@ public class ExecutionService {
 
     public ExecutionService(BotRepository bots, PositionRepository positions,
                             ExchangeKeyRepository keys, StrategyRepository strategies,
-                            CoinDcxTradeClient trade, TickerService ticker,
-                            MarketRulesService rules, SecretCrypto crypto,
+                            CoinDcxTradeClient trade, CoinDcxFuturesClient futuresClient,
+                            TickerService ticker, MarketRulesService rules, SecretCrypto crypto,
                             R2dbcEntityTemplate template, AuditService audit,
                             ObjectMapper mapper, AppProperties props) {
         this.bots = bots;
@@ -73,6 +73,7 @@ public class ExecutionService {
         this.keys = keys;
         this.strategies = strategies;
         this.trade = trade;
+        this.futuresClient = futuresClient;
         this.ticker = ticker;
         this.rules = rules;
         this.crypto = crypto;
@@ -143,22 +144,31 @@ public class ExecutionService {
                 .flatMap(open -> positions.findByBotIdAndPairAndStatus(bot.id(), signal.pair(), "OPEN")
                         .hasElement()
                         .filter(hasOpen -> !hasOpen)
-                        .flatMap(x -> {
-                            BigDecimal price = fillPrice(signal);
-                            BigDecimal slPrice = price.multiply(BigDecimal.ONE.add(risk.stoploss()))
-                                    .setScale(10, RoundingMode.HALF_UP);
-                            BigDecimal targetPrice = price.multiply(BigDecimal.ONE.add(risk.targetRoi()))
-                                    .setScale(10, RoundingMode.HALF_UP);
-                            if ("PAPER".equals(bot.mode())) {
-                                BigDecimal qty = bot.stakeAmount()
-                                        .divide(price, MathContext.DECIMAL64)
-                                        .setScale(8, RoundingMode.DOWN);
-                                if (qty.signum() <= 0) return Mono.empty();
-                                return paperFill(bot, signal, side, qty, price, slPrice, targetPrice);
-                            }
-                            int slots = (int) Math.max(1, bot.maxOpenTrades() - open);
-                            return liveEnter(bot, signal, side, price, slPrice, targetPrice, slots);
-                        }))
+                        .flatMap(x -> resolveFillPrice(bot, signal)
+                                .flatMap(price -> {
+                                    BigDecimal slPrice;
+                                    BigDecimal targetPrice;
+                                    if ("SHORT".equals(side)) {
+                                        slPrice = price.multiply(BigDecimal.ONE.subtract(risk.stoploss()))
+                                                .setScale(10, RoundingMode.HALF_UP);
+                                        targetPrice = price.multiply(BigDecimal.ONE.subtract(risk.targetRoi()))
+                                                .setScale(10, RoundingMode.HALF_UP);
+                                    } else {
+                                        slPrice = price.multiply(BigDecimal.ONE.add(risk.stoploss()))
+                                                .setScale(10, RoundingMode.HALF_UP);
+                                        targetPrice = price.multiply(BigDecimal.ONE.add(risk.targetRoi()))
+                                                .setScale(10, RoundingMode.HALF_UP);
+                                    }
+                                    if ("PAPER".equals(bot.mode())) {
+                                        BigDecimal qty = bot.stakeAmount()
+                                                .divide(price, MathContext.DECIMAL64)
+                                                .setScale(8, RoundingMode.DOWN);
+                                        if (qty.signum() <= 0) return Mono.empty();
+                                        return paperFill(bot, signal, side, qty, price, slPrice, targetPrice);
+                                    }
+                                    int slots = (int) Math.max(1, bot.maxOpenTrades() - open);
+                                    return liveEnter(bot, signal, side, price, slPrice, targetPrice, slots);
+                                })))
                 .thenReturn(bot);
     }
 
@@ -166,22 +176,38 @@ public class ExecutionService {
 
     private Mono<Bot> exit(Bot bot, Signal signal) {
         return positions.findByBotIdAndPairAndStatus(bot.id(), signal.pair(), "OPEN")
-                .flatMap(pos -> {
-                    BigDecimal price = fillPrice(signal);
-                    return "PAPER".equals(bot.mode())
-                            ? closePaperPosition(bot, pos, price, signal.id(), "SIGNAL_EXIT")
-                            : liveExit(bot, pos, price, signal.id(), "SIGNAL_EXIT");
-                })
+                .flatMap(pos -> resolveFillPrice(bot, signal)
+                        .flatMap(price -> "PAPER".equals(bot.mode())
+                                ? closePaperPosition(bot, pos, price, signal.id(), "SIGNAL_EXIT")
+                                : liveExit(bot, pos, price, signal.id(), "SIGNAL_EXIT")))
                 .thenReturn(bot);
     }
 
     // ---------------------------------------------------------------- pricing
 
-    /** Prefer the live ticker price; fall back to the signal's candle close. */
-    private BigDecimal fillPrice(Signal signal) {
+    /**
+     * FUTURES: CoinDCX live futures last/mark only — never invent a price.
+     * Missing price → skip fill (fail closed).
+     * SPOT: prefer live ticker, fall back to signal close.
+     */
+    private Mono<BigDecimal> resolveFillPrice(Bot bot, Signal signal) {
+        if ("FUTURES".equals(bot.marketType())) {
+            return futuresClient.lastPrice(signal.pair())
+                    .filter(p -> p != null && p.signum() > 0)
+                    .switchIfEmpty(Mono.defer(() -> {
+                        log.warn("Bot {} skipped {}: no CoinDCX futures price for {}",
+                                bot.id(), signal.action(), signal.pair());
+                        return Mono.empty();
+                    }));
+        }
         String market = pairToMarket(signal.pair());
         TickerService.Tick tick = ticker.last(market);
-        return tick != null ? tick.lastPrice() : signal.price();
+        BigDecimal price = tick != null ? tick.lastPrice() : signal.price();
+        if (price == null || price.signum() <= 0) {
+            log.warn("Bot {} skipped {}: non-positive fill price {}", bot.id(), signal.action(), price);
+            return Mono.empty();
+        }
+        return Mono.just(price);
     }
 
     // ------------------------------------------------------------------ paper
@@ -189,13 +215,15 @@ public class ExecutionService {
     private Mono<Void> paperFill(Bot bot, Signal signal, String posSide,
                                  BigDecimal qty, BigDecimal price,
                                  BigDecimal slPrice, BigDecimal targetPrice) {
+        String orderSide = "SHORT".equals(posSide) ? "SELL" : "BUY";
         TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(), bot.userId(), bot.id(),
-                signal.id(), null, "paper-" + UUID.randomUUID(), signal.pair(), "BUY",
+                signal.id(), null, "paper-" + UUID.randomUUID(), signal.pair(), orderSide,
                 "MARKET_ORDER", bot.marketType(), "PAPER", "FILLED", price, qty, qty, price,
                 BigDecimal.ZERO, null, Instant.now(), Instant.now());
         Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(), bot.id(),
                 signal.pair(), posSide, qty, price, null, bot.leverage(), "OPEN", null,
-                slPrice, targetPrice, null, Instant.now(), null);
+                slPrice, targetPrice, null, bot.marginCurrency() == null ? "INR" : bot.marginCurrency(),
+                Instant.now(), null);
         return template.insert(order).then(template.insert(pos))
                 .then(audit.record(bot.tenantId(), bot.userId(), "PAPER_ENTRY", "POSITION", pos.id(),
                         Map.of("pair", signal.pair(), "qty", qty.toPlainString(),
@@ -207,8 +235,9 @@ public class ExecutionService {
     /** Close a paper position at the given price (signal exit, SL or target). */
     Mono<Void> closePaperPosition(Bot bot, Position pos, BigDecimal price,
                                   UUID signalId, String reason) {
+        String orderSide = "SHORT".equals(pos.side()) ? "BUY" : "SELL";
         TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(), bot.userId(), bot.id(),
-                signalId, null, "paper-" + UUID.randomUUID(), pos.pair(), "SELL",
+                signalId, null, "paper-" + UUID.randomUUID(), pos.pair(), orderSide,
                 "MARKET_ORDER", bot.marketType(), "PAPER", "FILLED", price, pos.quantity(),
                 pos.quantity(), price, BigDecimal.ZERO, null, Instant.now(), Instant.now());
         return template.insert(order).then(closePosition(pos, price))
@@ -224,7 +253,8 @@ public class ExecutionService {
                 .multiply(pos.quantity()).multiply(direction).multiply(pos.leverage());
         Position closed = new Position(pos.id(), pos.tenantId(), pos.userId(), pos.botId(), pos.pair(),
                 pos.side(), pos.quantity(), pos.entryPrice(), exitPrice, pos.leverage(), "CLOSED",
-                pnl, pos.slPrice(), pos.targetPrice(), pos.slOrderId(), pos.openedAt(), Instant.now());
+                pnl, pos.slPrice(), pos.targetPrice(), pos.slOrderId(), pos.marginCurrency(),
+                pos.openedAt(), Instant.now());
         return positions.save(closed).then();
     }
 
@@ -236,6 +266,9 @@ public class ExecutionService {
      */
     private Mono<Void> liveEnter(Bot bot, Signal signal, String posSide, BigDecimal price,
                                  BigDecimal slPrice, BigDecimal targetPrice, int slots) {
+        if ("FUTURES".equals(bot.marketType())) {
+            return liveFuturesEnter(bot, signal, posSide, price, slPrice, targetPrice, slots);
+        }
         String market = pairToMarket(signal.pair());
         return withKey(bot).flatMap(key -> trade.balances(key.apiKey(), key.apiSecret())
                 .flatMap(balances -> {
@@ -253,12 +286,101 @@ public class ExecutionService {
                                 BigDecimal notional = qty.multiply(price);
                                 if (qty.compareTo(rule.minQuantity()) < 0
                                         || notional.compareTo(rule.minNotional()) < 0) {
-                                    return skip(bot, signal, "funds below market minimum (qty="
-                                            + qty.toPlainString() + ", notional="
-                                            + notional.toPlainString() + ")");
+                                    return skip(bot, signal, "funds below market minimum");
                                 }
                                 return placeLiveEntry(bot, signal, key, market, posSide,
                                         qty, price, slPrice, targetPrice);
+                            });
+                }));
+    }
+
+    private Mono<Void> liveFuturesEnter(Bot bot, Signal signal, String posSide, BigDecimal price,
+                                        BigDecimal slPrice, BigDecimal targetPrice, int slots) {
+        String pair = signal.pair();
+        String side = "SHORT".equals(posSide) ? "sell" : "buy";
+        int leverage = bot.leverage() == null ? props.pipeline().futuresLeverage()
+                : bot.leverage().intValue();
+        String margin = "INR";
+        return withKey(bot).flatMap(key -> futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
+                .flatMap(available -> {
+                    BigDecimal maxWallet = available.multiply(BigDecimal.valueOf(props.pipeline().maxWalletPct()));
+                    BigDecimal stake = bot.stakeAmount().min(maxWallet)
+                            .divide(BigDecimal.valueOf(slots), MathContext.DECIMAL64);
+                    if (stake.signum() <= 0) {
+                        return skip(bot, signal, "no available INR futures balance");
+                    }
+                    return futuresClient.instrumentDetails(pair, margin)
+                            .flatMap(inst -> {
+                                BigDecimal qty = stake.multiply(BigDecimal.valueOf(leverage))
+                                        .divide(price, MathContext.DECIMAL64)
+                                        .setScale(8, RoundingMode.DOWN);
+                                BigDecimal notional = qty.multiply(price);
+                                if (qty.signum() <= 0
+                                        || qty.compareTo(inst.minQuantity()) < 0
+                                        || notional.compareTo(inst.minNotional()) < 0) {
+                                    String reason = "below min notional/qty (qty=" + qty.toPlainString()
+                                            + " notional=" + notional.toPlainString()
+                                            + " minQty=" + inst.minQuantity()
+                                            + " minNotional=" + inst.minNotional() + ")";
+                                    log.warn("Bot {} skipped LIVE futures entry: {}", bot.id(), reason);
+                                    TradeOrder failed = new TradeOrder(UUID.randomUUID(),
+                                            bot.tenantId(), bot.userId(), bot.id(), signal.id(),
+                                            null, "ca-f-" + UUID.randomUUID(), pair,
+                                            side.toUpperCase(), "MARKET_ORDER", "FUTURES",
+                                            "LIVE", "FAILED", price, qty.max(BigDecimal.ZERO),
+                                            BigDecimal.ZERO, null, BigDecimal.ZERO, reason,
+                                            Instant.now(), Instant.now());
+                                    return template.insert(failed)
+                                            .then(audit.record(bot.tenantId(), bot.userId(),
+                                                    "LIVE_FUTURES_ORDER_FAILED", "ORDER", failed.id(),
+                                                    Map.of("pair", pair, "side", side,
+                                                            "qty", qty.toPlainString(),
+                                                            "margin", margin,
+                                                            "error", reason)))
+                                            .then(skip(bot, signal, reason));
+                                }
+                                final BigDecimal fillQty = qty;
+                                return futuresClient.placeOrder(key.apiKey(), key.apiSecret(), pair, side,
+                                                fillQty, leverage, margin, targetPrice, slPrice)
+                                        .flatMap(resp -> {
+                                            TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(),
+                                                    bot.userId(), bot.id(), signal.id(),
+                                                    resp.path("id").asText(resp.path("orders").path(0).path("id").asText(null)),
+                                                    "ca-f-" + UUID.randomUUID(), pair, side.toUpperCase(),
+                                                    "MARKET_ORDER", "FUTURES", "LIVE", "OPEN",
+                                                    price, fillQty, fillQty, price, BigDecimal.ZERO, null,
+                                                    Instant.now(), Instant.now());
+                                            Position pos = new Position(UUID.randomUUID(), bot.tenantId(),
+                                                    bot.userId(), bot.id(), pair, posSide, fillQty, price, null,
+                                                    bot.leverage(), "OPEN", null, slPrice, targetPrice, null,
+                                                    margin, Instant.now(), null);
+                                            return template.insert(order).then(template.insert(pos))
+                                                    .then(audit.record(bot.tenantId(), bot.userId(),
+                                                            "LIVE_FUTURES_ORDER", "ORDER", order.id(),
+                                                            Map.of("pair", pair, "side", side,
+                                                                    "qty", fillQty.toPlainString(),
+                                                                    "margin", margin)));
+                                        })
+                                        .onErrorResume(e -> {
+                                            log.error("CoinDCX futures placeOrder failed for bot {}: {}",
+                                                    bot.id(), e.getMessage());
+                                            TradeOrder failed = new TradeOrder(UUID.randomUUID(),
+                                                    bot.tenantId(), bot.userId(), bot.id(), signal.id(),
+                                                    null, "ca-f-" + UUID.randomUUID(), pair,
+                                                    side.toUpperCase(), "MARKET_ORDER", "FUTURES",
+                                                    "LIVE", "FAILED", price, fillQty, BigDecimal.ZERO,
+                                                    null, BigDecimal.ZERO,
+                                                    String.valueOf(e.getMessage()),
+                                                    Instant.now(), Instant.now());
+                                            return template.insert(failed)
+                                                    .then(audit.record(bot.tenantId(), bot.userId(),
+                                                            "LIVE_FUTURES_ORDER_FAILED", "ORDER", failed.id(),
+                                                            Map.of("pair", pair, "side", side,
+                                                                    "qty", fillQty.toPlainString(),
+                                                                    "margin", margin,
+                                                                    "error", String.valueOf(e.getMessage()))))
+                                                    .then();
+                                        });
                             });
                 }));
     }
@@ -274,7 +396,8 @@ public class ExecutionService {
                             signal.pair(), "BUY", "MARKET_ORDER", price, qty);
                     Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(),
                             bot.id(), signal.pair(), posSide, qty, price, null, bot.leverage(),
-                            "OPEN", null, slPrice, targetPrice, null, Instant.now(), null);
+                            "OPEN", null, slPrice, targetPrice, null, bot.marginCurrency(),
+                            Instant.now(), null);
                     return template.insert(order).then(template.insert(pos))
                             .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_ORDER_PLACED",
                                     "ORDER", order.id(), Map.of("market", market, "side", "buy",
@@ -300,7 +423,8 @@ public class ExecutionService {
                     Position updated = new Position(pos.id(), pos.tenantId(), pos.userId(),
                             pos.botId(), pos.pair(), pos.side(), pos.quantity(), pos.entryPrice(),
                             pos.exitPrice(), pos.leverage(), pos.status(), pos.realizedPnl(),
-                            pos.slPrice(), pos.targetPrice(), exchangeId, pos.openedAt(), pos.closedAt());
+                            pos.slPrice(), pos.targetPrice(), exchangeId, pos.marginCurrency(),
+                            pos.openedAt(), pos.closedAt());
                     return template.insert(slOrder).then(positions.save(updated)).then();
                 })
                 .onErrorResume(e -> {
@@ -311,8 +435,11 @@ public class ExecutionService {
                 });
     }
 
-    /** Live exit at market: cancel the resting SL leg first, then sell. */
+    /** Live exit at market: cancel the resting SL leg first, then close. */
     Mono<Void> liveExit(Bot bot, Position pos, BigDecimal price, UUID signalId, String reason) {
+        if ("FUTURES".equals(bot.marketType())) {
+            return liveFuturesExit(bot, pos, price, signalId, reason);
+        }
         String market = pairToMarket(pos.pair());
         String clientOrderId = "ca-" + UUID.randomUUID();
         return withKey(bot).flatMap(key -> cancelSlLeg(key, pos)
@@ -328,6 +455,30 @@ public class ExecutionService {
                                             "price", price.toPlainString(), "reason", reason)));
                 })
                 .then());
+    }
+
+    private Mono<Void> liveFuturesExit(Bot bot, Position pos, BigDecimal price,
+                                       UUID signalId, String reason) {
+        String closeSide = "SHORT".equals(pos.side()) ? "buy" : "sell";
+        int leverage = bot.leverage() == null ? props.pipeline().futuresLeverage()
+                : bot.leverage().intValue();
+        String margin = bot.marginCurrency() == null ? "INR" : bot.marginCurrency();
+        return withKey(bot).flatMap(key -> futuresClient.placeOrder(
+                        key.apiKey(), key.apiSecret(), pos.pair(), closeSide,
+                        pos.quantity(), leverage, margin, null, null)
+                .flatMap(resp -> {
+                    TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(),
+                            bot.userId(), bot.id(), signalId,
+                            resp.path("id").asText(resp.path("orders").path(0).path("id").asText(null)),
+                            "ca-fx-" + UUID.randomUUID(), pos.pair(), closeSide.toUpperCase(),
+                            "MARKET_ORDER", "FUTURES", "LIVE", "OPEN",
+                            price, pos.quantity(), pos.quantity(), price, BigDecimal.ZERO, null,
+                            Instant.now(), Instant.now());
+                    return template.insert(order).then(closePosition(pos, price))
+                            .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_FUTURES_EXIT",
+                                    "POSITION", pos.id(), Map.of("pair", pos.pair(),
+                                            "price", price.toPlainString(), "reason", reason)));
+                }));
     }
 
     private Mono<Void> cancelSlLeg(DecryptedKey key, Position pos) {

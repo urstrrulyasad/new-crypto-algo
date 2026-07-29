@@ -1,12 +1,7 @@
-"""Backtest simulator over real CoinDCX OHLCV data.
+"""Backtest simulator over CoinDCX OHLCV (spot or futures).
 
-Executes the strategy's populate_indicators / populate_entry_trend /
-populate_exit_trend on the candle DataFrame, then replays candles:
-- enters long on enter_long=1 at next candle open
-- exits on exit_long=1, stoploss breach, or minimal_roi target
-- applies taker fees both ways
-
-Reported metrics follow freqtrade's backtest report conventions.
+Supports long and short, leverage, fees, slippage, and paper liquidation
+when margin is wiped. Metrics include win rate, profit factor, max DD, Sharpe.
 """
 from __future__ import annotations
 
@@ -14,69 +9,107 @@ import math
 
 import pandas as pd
 
-FEE_RATE = 0.001  # 0.1% taker fee per side (CoinDCX default spot tier)
+FEE_RATE = 0.00075  # ~0.075% futures taker
+SLIPPAGE = 0.0005
 
 
-def run_backtest(strategy_cls, df: pd.DataFrame, pair: str, stake: float = 1000.0) -> dict:
+def run_backtest(strategy_cls, df: pd.DataFrame, pair: str, stake: float = 1000.0,
+                 leverage: float = 1.0, market_type: str = "SPOT") -> dict:
     strategy = strategy_cls()
     stoploss = float(getattr(strategy, "stoploss", -0.10))
+    if stoploss > 0:
+        stoploss = -stoploss
     minimal_roi = {int(k): float(v) for k, v in getattr(strategy, "minimal_roi", {"0": 0.05}).items()}
     timeframe = getattr(strategy, "timeframe", "1h")
+    lev = max(1.0, float(getattr(strategy, "leverage", leverage) or leverage))
 
     df = strategy.populate_indicators(df.copy())
     df = strategy.populate_entry_trend(df)
     df = strategy.populate_exit_trend(df)
-    for col in ("enter_long", "exit_long"):
+    for col in ("enter_long", "exit_long", "enter_short", "exit_short"):
         if col not in df.columns:
             df[col] = 0
     df = df.reset_index(drop=True)
 
     trades: list[dict] = []
-    in_trade = False
+    side: str | None = None
     entry_price = 0.0
     entry_time = None
     equity = [1.0]
+    is_futures = market_type.upper() == "FUTURES"
 
     for i in range(1, len(df)):
         row = df.iloc[i]
         prev = df.iloc[i - 1]
         price_open = float(row["open"])
 
-        if not in_trade and prev.get("enter_long", 0) == 1:
-            in_trade, entry_price, entry_time = True, price_open, row["date"]
+        if side is None:
+            if prev.get("enter_long", 0) == 1:
+                side, entry_price, entry_time = "long", price_open * (1 + SLIPPAGE), row["date"]
+                continue
+            if is_futures and prev.get("enter_short", 0) == 1:
+                side, entry_price, entry_time = "short", price_open * (1 - SLIPPAGE), row["date"]
+                continue
             continue
 
-        if in_trade:
-            minutes_held = (row["date"] - entry_time).total_seconds() / 60
-            roi_target = _roi_for(minimal_roi, minutes_held)
-            low_ratio = float(row["low"]) / entry_price - 1
-            high_ratio = float(row["high"]) / entry_price - 1
+        minutes_held = (row["date"] - entry_time).total_seconds() / 60
+        roi_target = _roi_for(minimal_roi, minutes_held)
+        low, high = float(row["low"]), float(row["high"])
 
-            exit_price = None
-            reason = None
+        exit_price = None
+        reason = None
+
+        if side == "long":
+            low_ratio = low / entry_price - 1
+            high_ratio = high / entry_price - 1
             if low_ratio <= stoploss:
                 exit_price, reason = entry_price * (1 + stoploss), "stoploss"
             elif roi_target is not None and high_ratio >= roi_target:
                 exit_price, reason = entry_price * (1 + roi_target), "roi"
             elif prev.get("exit_long", 0) == 1:
-                exit_price, reason = price_open, "exit_signal"
+                exit_price, reason = price_open * (1 - SLIPPAGE), "exit_signal"
+            elif is_futures and low_ratio * lev <= -0.95:
+                exit_price, reason = low, "liquidation"
+        else:
+            # short: profit when price falls
+            high_ratio = entry_price / high - 1  # loss when high rises
+            low_ratio = entry_price / low - 1
+            adverse = high / entry_price - 1
+            if adverse >= abs(stoploss):
+                exit_price, reason = entry_price * (1 + abs(stoploss)), "stoploss"
+            elif roi_target is not None and low_ratio >= roi_target:
+                exit_price, reason = entry_price * (1 - roi_target), "roi"
+            elif prev.get("exit_short", 0) == 1:
+                exit_price, reason = price_open * (1 + SLIPPAGE), "exit_signal"
+            elif is_futures and adverse * lev >= 0.95:
+                exit_price, reason = high, "liquidation"
 
-            if exit_price is not None:
-                profit_ratio = (exit_price / entry_price) * (1 - FEE_RATE) ** 2 - 1
-                trades.append({
-                    "pair": pair,
-                    "entry_time": entry_time.isoformat(),
-                    "exit_time": row["date"].isoformat(),
-                    "entry_price": round(entry_price, 10),
-                    "exit_price": round(exit_price, 10),
-                    "profit_ratio": round(profit_ratio, 6),
-                    "profit_abs": round(stake * profit_ratio, 4),
-                    "exit_reason": reason,
-                })
-                equity.append(equity[-1] * (1 + profit_ratio))
-                in_trade = False
+        if exit_price is not None:
+            if side == "long":
+                raw = exit_price / entry_price - 1
+            else:
+                raw = entry_price / exit_price - 1
+            profit_ratio = (1 + raw * lev) * (1 - FEE_RATE) ** 2 - 1
+            trades.append({
+                "pair": pair,
+                "side": side,
+                "entry_time": entry_time.isoformat(),
+                "exit_time": row["date"].isoformat(),
+                "entry_price": round(entry_price, 10),
+                "exit_price": round(exit_price, 10),
+                "profit_ratio": round(profit_ratio, 6),
+                "profit_abs": round(stake * profit_ratio, 4),
+                "exit_reason": reason,
+                "leverage": lev,
+            })
+            equity.append(equity[-1] * (1 + profit_ratio))
+            side = None
 
-    return {"metrics": _metrics(trades, equity, df, timeframe), "trades": trades}
+    return {
+        "metrics": _metrics(trades, equity, df, timeframe, lev),
+        # Cap trade list so HTTP clients don't hit buffer limits; metrics stay full-run.
+        "trades": trades[-100:],
+    }
 
 
 def _roi_for(minimal_roi: dict[int, float], minutes: float):
@@ -84,7 +117,8 @@ def _roi_for(minimal_roi: dict[int, float], minutes: float):
     return applicable[-1] if applicable else (minimal_roi.get(0) if 0 in minimal_roi else None)
 
 
-def _metrics(trades: list[dict], equity: list[float], df: pd.DataFrame, timeframe: str) -> dict:
+def _metrics(trades: list[dict], equity: list[float], df: pd.DataFrame,
+             timeframe: str, leverage: float) -> dict:
     total = len(trades)
     wins = sum(1 for t in trades if t["profit_ratio"] > 0)
     losses = total - wins
@@ -109,8 +143,9 @@ def _metrics(trades: list[dict], equity: list[float], df: pd.DataFrame, timefram
 
     return {
         "timeframe": timeframe,
-        "start": df["date"].iloc[0].isoformat(),
-        "end": df["date"].iloc[-1].isoformat(),
+        "leverage": leverage,
+        "start": df["date"].iloc[0].isoformat() if len(df) else None,
+        "end": df["date"].iloc[-1].isoformat() if len(df) else None,
         "candles": len(df),
         "trades": total,
         "wins": wins,

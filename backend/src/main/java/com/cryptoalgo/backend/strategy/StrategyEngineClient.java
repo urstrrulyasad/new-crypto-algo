@@ -24,6 +24,7 @@ public class StrategyEngineClient {
         this.client = builder.clone()
                 .baseUrl(props.strategyEngine().baseUrl())
                 .defaultHeader("X-Internal-Token", props.internal().token())
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .build();
     }
 

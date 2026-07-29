@@ -21,8 +21,23 @@ public record AppProperties(
     public record Bootstrap(String email, String password) {}
     public record Cors(String allowedOrigins) {}
 
-    /** Autonomous pipeline knobs: paper-trade gate and auto-created bot defaults. */
-    public record Pipeline(int minPaperTrades, double winRateThreshold, int backtestDays,
-                           java.math.BigDecimal paperStake, int maxOpenTrades,
-                           double defaultStoploss, double defaultTargetRoi) {}
+    public record Pipeline(
+            int minPaperTrades,
+            double winRateThreshold,
+            int backtestDays,
+            java.math.BigDecimal paperStake,
+            int maxOpenTrades,
+            double defaultStoploss,
+            double defaultTargetRoi,
+            int futuresLeverage,
+            int maxInstruments,
+            int minBacktestTrades,
+            double maxBacktestDrawdownPct,
+            double minBacktestWinRate,
+            double minBacktestProfitPct,
+            double minBacktestProfitFactor,
+            int maxLiveBots,
+            double maxWalletPct,
+            long autoGenMs
+    ) {}
 }
