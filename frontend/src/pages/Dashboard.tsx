@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { Badge, Button, Card, Empty, PageTitle, Spinner, Stat } from '@/components/ui'
 
@@ -26,6 +27,8 @@ interface Position {
   exitPrice?: number
   status: string
   realizedPnl?: number
+  slPrice?: number | null
+  targetPrice?: number | null
   marginCurrency?: string
   openedAt: string
 }
@@ -44,6 +47,7 @@ interface Order {
 
 /** LIVE cockpit only — CoinDCX INR wallet + LIVE bot money. No paper. No instrument list. */
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [summary, setSummary] = useState<Summary | null>(null)
   const [wallet, setWallet] = useState<Wallet | null>(null)
   const [walletErr, setWalletErr] = useState('')
@@ -145,7 +149,15 @@ export default function Dashboard() {
                 </thead>
                 <tbody>
                   {positions.slice(0, 30).map((p) => (
-                    <tr key={p.id} className="border-b border-edge/40 text-slate-300">
+                    <tr
+                      key={p.id}
+                      className="cursor-pointer border-b border-edge/40 text-slate-300 hover:bg-cyan-500/5"
+                      onClick={() =>
+                        navigate(
+                          `/futures/chart/${encodeURIComponent(p.pair)}?mode=live&positionId=${p.id}&timeframe=5m`,
+                        )
+                      }
+                    >
                       <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
                       <td className="py-2.5 pr-4">
                         <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
@@ -188,7 +200,13 @@ export default function Dashboard() {
                 </thead>
                 <tbody>
                   {orders.slice(0, 30).map((o) => (
-                    <tr key={o.id} className="border-b border-edge/40 text-slate-300">
+                    <tr
+                      key={o.id}
+                      className="cursor-pointer border-b border-edge/40 text-slate-300 hover:bg-cyan-500/5"
+                      onClick={() =>
+                        navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
+                      }
+                    >
                       <td className="py-2.5 pr-4 font-medium text-slate-200">{o.pair}</td>
                       <td className="py-2.5 pr-4">{o.side}</td>
                       <td className="py-2.5 pr-4">

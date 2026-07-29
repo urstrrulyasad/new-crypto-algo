@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
 import { Badge, Button, Card, Empty, PageTitle, Spinner } from '@/components/ui'
@@ -308,6 +309,13 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          {(strategy.instrument || strategy.config?.pairs?.[0]) && (
+            <Link
+              to={`/futures/chart/${encodeURIComponent(strategy.instrument ?? strategy.config!.pairs![0])}?mode=strategy&strategyId=${strategy.id}&timeframe=5m`}
+            >
+              <Button variant="ghost">Open chart</Button>
+            </Link>
+          )}
           {(['paper', 'orders', 'backtest', 'code'] as const).map((t) => (
             <Button key={t} variant={tab === t ? 'primary' : 'ghost'} onClick={() => setTab(t)}>
               {t === 'paper' ? 'Paper trades' : t === 'orders' ? 'Orders' : t === 'backtest' ? 'Backtest' : 'Code'}

@@ -14,6 +14,7 @@ const groups: NavGroup[] = [
     items: [
       { to: '/futures/strategies', label: 'Strategies' },
       { to: '/futures/paper', label: 'Paper Trade' },
+      { to: '/futures/coins', label: 'Coins' },
     ],
   },
   {
