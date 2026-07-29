@@ -71,6 +71,16 @@ class BacktestRequest(BaseModel):
     market_type: str = "FUTURES"
 
 
+class PaperCatchupRequest(BaseModel):
+    tenant_id: str
+    strategy_id: str
+    source_code: str
+    pairs: list[str]
+    timeframe: str = "5m"
+    market_type: str = "FUTURES"
+    bars: int = 800
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -221,3 +231,18 @@ async def backtest(req: BacktestRequest, x_internal_token: str | None = Header(N
         "market_type": req.market_type,
     }
     return {"metrics": combined, "trades": sorted(all_trades, key=lambda t: t["entry_time"])}
+
+
+@app.post("/paper-catchup")
+async def paper_catchup(req: PaperCatchupRequest, x_internal_token: str | None = Header(None)):
+    """Replay CoinDCX candle history into paper signals for LIVE-gate progress."""
+    check_token(x_internal_token)
+    item = {
+        "tenantId": req.tenant_id,
+        "strategyId": req.strategy_id,
+        "sourceCode": req.source_code,
+        "pairs": req.pairs,
+        "timeframe": req.timeframe,
+        "marketType": req.market_type,
+    }
+    return await runner.catchup_strategy(item, bars=req.bars)

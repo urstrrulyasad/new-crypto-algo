@@ -186,12 +186,18 @@ public class ExecutionService {
     // ---------------------------------------------------------------- pricing
 
     /**
-     * FUTURES: CoinDCX live futures last/mark only — never invent a price.
+     * FUTURES live: CoinDCX last/mark only — never invent a price.
+     * FUTURES paper catchup: use the CoinDCX candle close from the signal
+     * (real historical exchange data) so paper can accumulate closed trades.
      * Missing price → skip fill (fail closed).
      * SPOT: prefer live ticker, fall back to signal close.
      */
     private Mono<BigDecimal> resolveFillPrice(Bot bot, Signal signal) {
         if ("FUTURES".equals(bot.marketType())) {
+            if ("PAPER".equals(bot.mode()) && isPaperCatchup(signal)
+                    && signal.price() != null && signal.price().signum() > 0) {
+                return Mono.just(signal.price());
+            }
             return futuresClient.lastPrice(signal.pair())
                     .filter(p -> p != null && p.signum() > 0)
                     .switchIfEmpty(Mono.defer(() -> {
@@ -540,5 +546,15 @@ public class ExecutionService {
         int dash = pair.indexOf('-');
         String raw = dash >= 0 ? pair.substring(dash + 1) : pair;
         return raw.replace("_", "");
+    }
+
+    /** Paper catchup signals carry real CoinDCX candle closes in signal.price. */
+    private boolean isPaperCatchup(Signal signal) {
+        if (signal.payload() == null) return false;
+        try {
+            return mapper.readTree(signal.payload().asString()).path("catchup").asBoolean(false);
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

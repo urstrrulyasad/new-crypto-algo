@@ -43,6 +43,11 @@ public class StrategyEngineClient {
         return post("/backtest", request, Duration.ofMinutes(15));
     }
 
+    /** Replay recent CoinDCX candles into paper signals (catch-up for LIVE gate). */
+    public Mono<JsonNode> paperCatchup(Map<String, Object> request) {
+        return post("/paper-catchup", request, Duration.ofMinutes(10));
+    }
+
     private Mono<JsonNode> post(String path, Object body, Duration timeout) {
         return client.post().uri(path)
                 .contentType(MediaType.APPLICATION_JSON)

@@ -21,8 +21,11 @@ import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class PaperEvaluationService {
@@ -35,25 +38,28 @@ public class PaperEvaluationService {
     private final BacktestRepository backtests;
     private final PaperStatsService paperStats;
     private final StrategyPipelineService pipeline;
+    private final StrategyEngineClient engine;
     private final CoinDcxFuturesClient futures;
     private final SecretCrypto crypto;
     private final R2dbcEntityTemplate template;
     private final AuditService audit;
     private final AppProperties props;
     private final ObjectMapper mapper;
+    private final Set<UUID> catchupStarted = ConcurrentHashMap.newKeySet();
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
                                   PaperStatsService paperStats, StrategyPipelineService pipeline,
-                                  CoinDcxFuturesClient futures, SecretCrypto crypto,
-                                  R2dbcEntityTemplate template, AuditService audit,
-                                  AppProperties props, ObjectMapper mapper) {
+                                  StrategyEngineClient engine, CoinDcxFuturesClient futures,
+                                  SecretCrypto crypto, R2dbcEntityTemplate template,
+                                  AuditService audit, AppProperties props, ObjectMapper mapper) {
         this.strategies = strategies;
         this.bots = bots;
         this.keys = keys;
         this.backtests = backtests;
         this.paperStats = paperStats;
         this.pipeline = pipeline;
+        this.engine = engine;
         this.futures = futures;
         this.crypto = crypto;
         this.template = template;
@@ -86,7 +92,10 @@ public class PaperEvaluationService {
                     });
         }
         return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
-            if (stats.closedTrades() < props.pipeline().minPaperTrades()) return Mono.empty();
+            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
+                kickPaperCatchup(strategy);
+                return Mono.empty();
+            }
             if (stats.winRate() < props.pipeline().winRateThreshold()) return Mono.empty();
             return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
                             strategy.tenantId(), strategy.id())
@@ -110,6 +119,41 @@ public class PaperEvaluationService {
                     .switchIfEmpty(audit.record(strategy.tenantId(), strategy.userId(),
                             "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY", strategy.id(), Map.of()).then());
         });
+    }
+
+    /**
+     * One-shot replay of recent CoinDCX candles into paper fills so the LIVE gate
+     * can progress without waiting wall-clock days on 5m entries.
+     */
+    private void kickPaperCatchup(Strategy strategy) {
+        if (strategy.instrument() == null || strategy.sourceCode() == null) return;
+        if (!catchupStarted.add(strategy.id())) return;
+        String tf = "5m";
+        try {
+            if (strategy.config() != null) {
+                tf = mapper.readTree(strategy.config().asString()).path("timeframe").asText("5m");
+            }
+        } catch (Exception ignored) {
+            // default 5m
+        }
+        Map<String, Object> req = Map.of(
+                "tenant_id", strategy.tenantId().toString(),
+                "strategy_id", strategy.id().toString(),
+                "source_code", strategy.sourceCode(),
+                "pairs", List.of(strategy.instrument()),
+                "timeframe", tf,
+                "market_type", "FUTURES",
+                "bars", 800
+        );
+        log.info("Paper catchup starting for {} ({})", strategy.instrument(), strategy.id());
+        engine.paperCatchup(req)
+                .doOnNext(r -> log.info("Paper catchup done for {}: {}", strategy.instrument(), r))
+                .doOnError(e -> {
+                    catchupStarted.remove(strategy.id());
+                    log.warn("Paper catchup failed for {}: {}", strategy.instrument(), e.getMessage());
+                })
+                .onErrorResume(e -> Mono.empty())
+                .subscribe();
     }
 
     private JsonNode readMetrics(io.r2dbc.postgresql.codec.Json json) {
