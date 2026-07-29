@@ -139,7 +139,7 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
             if result.get("status") == "ACCEPTED":
                 accepted += 1
             # Yield so backend can fill before the next signal in the sequence.
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.015)
     log.info("Catchup strategy %s posted=%s accepted=%s", item.get("strategyId"), posted, accepted)
     return {"ok": True, "posted": posted, "accepted": accepted}
 

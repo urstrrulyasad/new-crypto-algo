@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class PaperEvaluationService {
@@ -49,7 +50,10 @@ public class PaperEvaluationService {
     /** Avoid flooding audit_log every evaluate tick for the same BAD_BACKTEST. */
     private final Set<UUID> badBacktestLogged = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<UUID, Long> catchupLastStartedMs = new ConcurrentHashMap<>();
+    /** Only one paper-catchup at a time — parallel 2500-bar replays kill the engine. */
+    private final AtomicBoolean catchupBusy = new AtomicBoolean(false);
     private static final long CATCHUP_COOLDOWN_MS = 5 * 60_000L;
+    private static final int CATCHUP_BARS = 8000;
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
@@ -123,8 +127,7 @@ public class PaperEvaluationService {
         }
         return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
             if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
-                kickPaperCatchup(strategy);
-                return Mono.empty();
+                return kickPaperCatchup(strategy);
             }
             if (stats.winRate() < props.pipeline().winRateThreshold()) return Mono.empty();
             return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
@@ -167,45 +170,64 @@ public class PaperEvaluationService {
     }
 
     /**
-     * One-shot replay of recent CoinDCX candles into paper fills so the LIVE gate
-     * can progress without waiting wall-clock days on 5m entries.
+     * Replay CoinDCX candles into paper fills. Serialized globally and only for
+     * strategies whose latest DONE backtest already passes LIVE quality — otherwise
+     * we burn the engine on coins that can never promote.
      */
-    private void kickPaperCatchup(Strategy strategy) {
-        if (strategy.instrument() == null || strategy.sourceCode() == null) return;
+    private Mono<Void> kickPaperCatchup(Strategy strategy) {
+        if (strategy.instrument() == null || strategy.sourceCode() == null) return Mono.empty();
         long now = System.currentTimeMillis();
         Long last = catchupLastStartedMs.get(strategy.id());
-        if (last != null && now - last < CATCHUP_COOLDOWN_MS) return;
-        if (!catchupStarted.add(strategy.id())) return;
-        catchupLastStartedMs.put(strategy.id(), now);
-        String tf = "5m";
-        try {
-            if (strategy.config() != null) {
-                tf = mapper.readTree(strategy.config().asString()).path("timeframe").asText("5m");
-            }
-        } catch (Exception ignored) {
-            // default 5m
-        }
-        Map<String, Object> req = Map.of(
-                "tenant_id", strategy.tenantId().toString(),
-                "strategy_id", strategy.id().toString(),
-                "source_code", strategy.sourceCode(),
-                "pairs", List.of(strategy.instrument()),
-                "timeframe", tf,
-                "market_type", "FUTURES",
-                "bars", 2500
-        );
-        log.info("Paper catchup starting for {} ({})", strategy.instrument(), strategy.id());
-        engine.paperCatchup(req)
-                .doOnNext(r -> {
-                    catchupStarted.remove(strategy.id());
-                    log.info("Paper catchup done for {}: {}", strategy.instrument(), r);
+        if (last != null && now - last < CATCHUP_COOLDOWN_MS) return Mono.empty();
+        if (catchupBusy.get()) return Mono.empty();
+        if (!catchupStarted.add(strategy.id())) return Mono.empty();
+
+        return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
+                        strategy.tenantId(), strategy.id())
+                .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
+                .next()
+                .flatMap(bt -> {
+                    JsonNode metrics = readMetrics(bt.metrics());
+                    if (!pipeline.passesLiveBacktestQuality(metrics)) {
+                        catchupStarted.remove(strategy.id());
+                        return Mono.empty();
+                    }
+                    if (!catchupBusy.compareAndSet(false, true)) {
+                        catchupStarted.remove(strategy.id());
+                        return Mono.empty();
+                    }
+                    catchupLastStartedMs.put(strategy.id(), now);
+                    String tf = "5m";
+                    try {
+                        if (strategy.config() != null) {
+                            tf = mapper.readTree(strategy.config().asString()).path("timeframe").asText("5m");
+                        }
+                    } catch (Exception ignored) {
+                        // default 5m
+                    }
+                    Map<String, Object> req = Map.of(
+                            "tenant_id", strategy.tenantId().toString(),
+                            "strategy_id", strategy.id().toString(),
+                            "source_code", strategy.sourceCode(),
+                            "pairs", List.of(strategy.instrument()),
+                            "timeframe", tf,
+                            "market_type", "FUTURES",
+                            "bars", CATCHUP_BARS
+                    );
+                    log.info("Paper catchup starting for {} ({}) bars={}",
+                            strategy.instrument(), strategy.id(), CATCHUP_BARS);
+                    return engine.paperCatchup(req)
+                            .doOnNext(r -> log.info("Paper catchup done for {}: {}", strategy.instrument(), r))
+                            .doOnError(e -> log.warn("Paper catchup failed for {}: {}",
+                                    strategy.instrument(), e.getMessage()))
+                            .doFinally(sig -> {
+                                catchupStarted.remove(strategy.id());
+                                catchupBusy.set(false);
+                            })
+                            .onErrorResume(e -> Mono.empty())
+                            .then();
                 })
-                .doOnError(e -> {
-                    catchupStarted.remove(strategy.id());
-                    log.warn("Paper catchup failed for {}: {}", strategy.instrument(), e.getMessage());
-                })
-                .onErrorResume(e -> Mono.empty())
-                .subscribe();
+                .switchIfEmpty(Mono.fromRunnable(() -> catchupStarted.remove(strategy.id())).then());
     }
 
     private JsonNode readMetrics(io.r2dbc.postgresql.codec.Json json) {
