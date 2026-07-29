@@ -110,7 +110,8 @@ public class StrategyPipelineService {
                         }));
     }
 
-    private void continuePipeline(Strategy strategy) {
+    /** Public so the scheduler can resume GENERATED strategies after a restart mid-backtest. */
+    public void continuePipeline(Strategy strategy) {
         String instrument = strategy.instrument();
         List<String> pairs = List.of(instrument);
         String timeframe = CoinDcxFuturesClient.normalizeFuturesTimeframe(

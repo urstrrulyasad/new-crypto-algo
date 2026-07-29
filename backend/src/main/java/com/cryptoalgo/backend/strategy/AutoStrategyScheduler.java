@@ -2,6 +2,7 @@ package com.cryptoalgo.backend.strategy;
 
 import com.cryptoalgo.backend.domain.Strategy;
 import com.cryptoalgo.backend.repo.AiProviderRepository;
+import com.cryptoalgo.backend.repo.BacktestRepository;
 import com.cryptoalgo.backend.repo.BotRepository;
 import com.cryptoalgo.backend.repo.StrategyRepository;
 import com.cryptoalgo.backend.repo.TenantRepository;
@@ -15,6 +16,8 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -37,19 +40,22 @@ public class AutoStrategyScheduler {
     private final AiProviderRepository providers;
     private final StrategyRepository strategies;
     private final BotRepository bots;
+    private final BacktestRepository backtests;
     private final CoinDcxFuturesClient futures;
     private final StrategyPipelineService pipeline;
     private final AppProperties props;
 
     public AutoStrategyScheduler(TenantRepository tenants, UserRepository users,
                                  AiProviderRepository providers, StrategyRepository strategies,
-                                 BotRepository bots, CoinDcxFuturesClient futures,
+                                 BotRepository bots, BacktestRepository backtests,
+                                 CoinDcxFuturesClient futures,
                                  StrategyPipelineService pipeline, AppProperties props) {
         this.tenants = tenants;
         this.users = users;
         this.providers = providers;
         this.strategies = strategies;
         this.bots = bots;
+        this.backtests = backtests;
         this.futures = futures;
         this.pipeline = pipeline;
         this.props = props;
@@ -82,9 +88,45 @@ public class AutoStrategyScheduler {
                                         List<String> top = rankInstruments(all, cap);
                                         Set<String> active = new HashSet<>(all);
                                         return delistGone(tenantId, active)
+                                                .then(resumeStuckGenerated(tenantId))
                                                 .then(generateMissing(tenantId, userId, top));
                                     }));
                 });
+    }
+
+    /**
+     * GENERATED + mid-flight backtest dies on backend restart (fire-and-forget subscribe).
+     * Fail stale RUNNING rows and re-kick continuePipeline so ETH etc. reach paper.
+     */
+    private Mono<Void> resumeStuckGenerated(UUID tenantId) {
+        Instant staleBefore = Instant.now().minus(Duration.ofMinutes(5));
+        return strategies.findByTenantIdAndMarketType(tenantId, "FUTURES")
+                .filter(s -> "GENERATED".equals(s.status()))
+                .concatMap(s -> backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(tenantId, s.id())
+                        .next()
+                        .flatMap(bt -> {
+                            if ("RUNNING".equals(bt.status()) && bt.createdAt().isBefore(staleBefore)) {
+                                log.warn("Stale RUNNING backtest {} for {}; re-queuing pipeline",
+                                        bt.id(), s.instrument());
+                                return backtests.save(new com.cryptoalgo.backend.domain.Backtest(
+                                                bt.id(), bt.tenantId(), bt.strategyId(), bt.timeframe(),
+                                                bt.pairs(), bt.rangeStart(), bt.rangeEnd(), "FAILED",
+                                                bt.metrics(), bt.trades(), "interrupted (stale RUNNING)",
+                                                bt.createdAt(), Instant.now()))
+                                        .doOnSuccess(v -> pipeline.continuePipeline(s))
+                                        .then();
+                            }
+                            if ("FAILED".equals(bt.status()) || "DONE".equals(bt.status())) {
+                                log.info("Resuming GENERATED {} after backtest {}", s.instrument(), bt.status());
+                                return Mono.fromRunnable(() -> pipeline.continuePipeline(s));
+                            }
+                            return Mono.empty();
+                        })
+                        .switchIfEmpty(Mono.fromRunnable(() -> {
+                            log.info("Resuming GENERATED {} with no backtest row", s.instrument());
+                            pipeline.continuePipeline(s);
+                        })))
+                .then();
     }
 
     /** Prefer liquid majors so auto strategies are testable; then fill remaining by API order. */
