@@ -53,7 +53,7 @@ public class PaperEvaluationService {
     /** Only one paper-catchup at a time — parallel 2500-bar replays kill the engine. */
     private final AtomicBoolean catchupBusy = new AtomicBoolean(false);
     private static final long CATCHUP_COOLDOWN_MS = 5 * 60_000L;
-    private static final int CATCHUP_BARS = 8000;
+    private static final int CATCHUP_BARS = 20000;
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
