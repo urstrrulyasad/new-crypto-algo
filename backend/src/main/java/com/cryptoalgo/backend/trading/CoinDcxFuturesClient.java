@@ -85,23 +85,33 @@ public class CoinDcxFuturesClient {
                         e -> ApiException.upstream("CoinDCX futures instrument failed: " + e.getMessage()));
     }
 
-    /** Keep each public candlestick response under WebClient's 256KB buffer. */
-    private static final Duration CANDLE_CHUNK = Duration.ofDays(3);
+    /**
+     * Keep each public candlestick response under WebClient's 256KB buffer.
+     * 1m is densest (~480 bars/8h); 5m fits ~2d; coarser TFs use 3d.
+     */
+    private static Duration candleChunk(String resolution) {
+        return switch (resolution) {
+            case "1" -> Duration.ofHours(8);
+            case "5" -> Duration.ofDays(2);
+            default -> Duration.ofDays(3);
+        };
+    }
 
     /**
      * Futures candlesticks. Resolution: 1 / 5 / 60 / 1D.
      * from/to are epoch seconds per CoinDCX docs.
-     * Long ranges are fetched in 3-day chunks (14d of 5m candles exceeds the 256KB body limit).
+     * Long ranges are fetched in resolution-sized chunks (1m/5m can exceed 256KB).
      */
     public Flux<CandleService.Candle> candles(String pair, String resolution,
                                               Instant from, Instant to) {
         if (!to.isAfter(from)) {
             return Flux.empty();
         }
+        Duration chunk = candleChunk(resolution);
         List<Instant[]> windows = new ArrayList<>();
         Instant cursor = from;
         while (cursor.isBefore(to)) {
-            Instant end = cursor.plus(CANDLE_CHUNK);
+            Instant end = cursor.plus(chunk);
             if (end.isAfter(to)) end = to;
             windows.add(new Instant[]{cursor, end});
             cursor = end;
