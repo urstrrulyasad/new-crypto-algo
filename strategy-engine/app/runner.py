@@ -118,6 +118,7 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
 
     posted = 0
     accepted = 0
+    skipped = 0
     for pair in item.get("pairs", []):
         df = await fetch_candles(pair, timeframe, start_ms, now_ms, market_type)
         strategy = strategy_cls()
@@ -125,12 +126,38 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
         df = strategy.populate_entry_trend(df)
         df = strategy.populate_exit_trend(df)
         # Walk closed candles only (skip forming last bar).
+        # Track local position so we don't HTTP-spam EXIT with no open trade
+        # (those rises are common and made 8000-bar catchups take ~1h).
         end = len(df) - 1
+        pos: str | None = None  # LONG | SHORT | None
         for i in range(1, end):
             closed = df.iloc[i]
             prev = df.iloc[i - 1]
             action = _action_for(closed, prev)
             if action is None:
+                continue
+            if action == "ENTRY_LONG":
+                if pos is not None:
+                    skipped += 1
+                    continue
+                pos = "LONG"
+            elif action == "ENTRY_SHORT":
+                if pos is not None:
+                    skipped += 1
+                    continue
+                pos = "SHORT"
+            elif action == "EXIT_LONG":
+                if pos != "LONG":
+                    skipped += 1
+                    continue
+                pos = None
+            elif action == "EXIT_SHORT":
+                if pos != "SHORT":
+                    skipped += 1
+                    continue
+                pos = None
+            else:
+                skipped += 1
                 continue
             posted += 1
             result = await _post_signal(
@@ -139,9 +166,10 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
             if result.get("status") == "ACCEPTED":
                 accepted += 1
             # Yield so backend can fill before the next signal in the sequence.
-            await asyncio.sleep(0.015)
-    log.info("Catchup strategy %s posted=%s accepted=%s", item.get("strategyId"), posted, accepted)
-    return {"ok": True, "posted": posted, "accepted": accepted}
+            await asyncio.sleep(0.01)
+    log.info("Catchup strategy %s posted=%s accepted=%s skipped=%s",
+             item.get("strategyId"), posted, accepted, skipped)
+    return {"ok": True, "posted": posted, "accepted": accepted, "skipped": skipped}
 
 
 async def _post_signal(item: dict, pair: str, timeframe: str, action: str,

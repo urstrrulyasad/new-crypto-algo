@@ -192,6 +192,14 @@ public class PaperEvaluationService {
                         catchupStarted.remove(strategy.id());
                         return Mono.empty();
                     }
+                    // Defer weak-but-passing edges so a strong quality passer
+                    // (e.g. F +25% bt) fills the 100-trade gate first.
+                    if (metrics.path("profit_total_pct").asDouble(0) < 5.0) {
+                        catchupStarted.remove(strategy.id());
+                        log.debug("Deferring catchup for {} — bt profit {} < 5%",
+                                strategy.instrument(), metrics.path("profit_total_pct").asText());
+                        return Mono.empty();
+                    }
                     if (!catchupBusy.compareAndSet(false, true)) {
                         catchupStarted.remove(strategy.id());
                         return Mono.empty();
