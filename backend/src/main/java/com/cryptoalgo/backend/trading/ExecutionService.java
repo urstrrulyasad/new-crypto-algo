@@ -323,11 +323,14 @@ public class ExecutionService {
                                     .defaultIfEmpty(available0);
                     return funded.flatMap(available -> futuresClient.usdtInrRate().flatMap(usdtInr -> {
                     BigDecimal maxWallet = available.multiply(BigDecimal.valueOf(props.pipeline().maxWalletPct()));
-                    BigDecimal stake = bot.stakeAmount().min(maxWallet)
-                            .divide(BigDecimal.valueOf(slots), MathContext.DECIMAL64);
+                    // Do not divide stake by maxOpenTrades slots — that undersizes below
+                    // CoinDCX min notional (e.g. 100/3 ≈ 33 INR vs ~60 INR needed at 10x).
+                    BigDecimal stake = bot.stakeAmount().min(maxWallet);
                     if (stake.signum() <= 0) {
                         return skip(bot, signal, "no available INR futures balance");
                     }
+                    log.info("LIVE futures size stake={} available={} usdtInr={} lev={} slotsCap={}",
+                            stake, available, usdtInr, leverage, slots);
                     return futuresClient.instrumentDetails(pair, margin)
                             .flatMap(inst -> {
                                 // INR margin: qty * price_usdt * usdtInr / leverage ≈ stake
