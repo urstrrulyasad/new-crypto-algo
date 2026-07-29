@@ -85,12 +85,35 @@ public class CoinDcxFuturesClient {
                         e -> ApiException.upstream("CoinDCX futures instrument failed: " + e.getMessage()));
     }
 
+    /** Keep each public candlestick response under WebClient's 256KB buffer. */
+    private static final Duration CANDLE_CHUNK = Duration.ofDays(3);
+
     /**
      * Futures candlesticks. Resolution: 1 / 5 / 60 / 1D.
      * from/to are epoch seconds per CoinDCX docs.
+     * Long ranges are fetched in 3-day chunks (14d of 5m candles exceeds the 256KB body limit).
      */
     public Flux<CandleService.Candle> candles(String pair, String resolution,
                                               Instant from, Instant to) {
+        if (!to.isAfter(from)) {
+            return Flux.empty();
+        }
+        List<Instant[]> windows = new ArrayList<>();
+        Instant cursor = from;
+        while (cursor.isBefore(to)) {
+            Instant end = cursor.plus(CANDLE_CHUNK);
+            if (end.isAfter(to)) end = to;
+            windows.add(new Instant[]{cursor, end});
+            cursor = end;
+        }
+        return Flux.fromIterable(windows)
+                .concatMap(w -> fetchCandleChunk(pair, resolution, w[0], w[1]))
+                .distinct(CandleService.Candle::ts)
+                .sort(Comparator.comparing(CandleService.Candle::ts));
+    }
+
+    private Flux<CandleService.Candle> fetchCandleChunk(String pair, String resolution,
+                                                        Instant from, Instant to) {
         return publicApi.get()
                 .uri(uri -> uri.path("/market_data/candlesticks")
                         .queryParam("pair", pair)
@@ -116,7 +139,6 @@ public class CoinDcxFuturesClient {
                                     new BigDecimal(c.path("volume").asText("0"))));
                         }
                     }
-                    out.sort(Comparator.comparing(CandleService.Candle::ts));
                     return out;
                 })
                 .flatMapMany(Flux::fromIterable)
