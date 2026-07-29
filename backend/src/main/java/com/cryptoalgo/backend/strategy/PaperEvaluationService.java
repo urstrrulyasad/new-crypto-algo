@@ -53,7 +53,7 @@ public class PaperEvaluationService {
     /** Only one paper-catchup at a time — parallel 2500-bar replays kill the engine. */
     private final AtomicBoolean catchupBusy = new AtomicBoolean(false);
     private static final long CATCHUP_COOLDOWN_MS = 5 * 60_000L;
-    private static final int CATCHUP_BARS = 20000;
+    private static final int CATCHUP_BARS = 8000;
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
@@ -129,7 +129,14 @@ public class PaperEvaluationService {
             if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
                 return kickPaperCatchup(strategy);
             }
-            if (stats.winRate() < props.pipeline().winRateThreshold()) return Mono.empty();
+            // Stop catchup once the trade-count gate is met — extending further
+            // into older history can dilute WR below the LIVE threshold.
+            if (stats.winRate() < props.pipeline().winRateThreshold()) {
+                log.info("Paper gate trades met for {} ({}/{}) but WR {} < {} — not promoting",
+                        strategy.instrument(), stats.closedTrades(), props.pipeline().minPaperTrades(),
+                        stats.winRate(), props.pipeline().winRateThreshold());
+                return Mono.empty();
+            }
             return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
                             strategy.tenantId(), strategy.id())
                     .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)

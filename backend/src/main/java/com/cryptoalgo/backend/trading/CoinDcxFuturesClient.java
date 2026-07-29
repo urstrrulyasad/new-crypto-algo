@@ -178,18 +178,23 @@ public class CoinDcxFuturesClient {
     public Mono<JsonNode> placeOrder(String apiKey, String apiSecret, String pair, String side,
                                      BigDecimal quantity, int leverage, String marginCurrency,
                                      BigDecimal takeProfit, BigDecimal stopLoss) {
+        // CoinDCX: do NOT send time_in_force on market orders (docs: causes 400).
+        // Round qty — fractional dust often rejects on alt pairs.
+        BigDecimal qty = quantity.stripTrailingZeros();
+        if (qty.scale() > 4) {
+            qty = qty.setScale(4, java.math.RoundingMode.DOWN).stripTrailingZeros();
+        }
         ObjectNode order = mapper.createObjectNode();
         order.put("side", side.toLowerCase());
         order.put("pair", pair);
         order.put("order_type", "market_order");
-        order.put("total_quantity", quantity);
+        order.put("total_quantity", qty);
         order.put("leverage", leverage);
         order.put("notification", "no_notification");
-        order.put("time_in_force", "good_till_cancel");
         order.put("hidden", false);
         order.put("post_only", false);
-        ArrayNode margins = order.putArray("margin_currency_short_name");
-        margins.add(marginCurrency);
+        // Docs request table: string; older examples used an array — string is accepted.
+        order.put("margin_currency_short_name", marginCurrency);
         if (takeProfit != null) order.put("take_profit_price", takeProfit);
         if (stopLoss != null) order.put("stop_loss_price", stopLoss);
 
@@ -311,6 +316,12 @@ public class CoinDcxFuturesClient {
                 .header("X-AUTH-SIGNATURE", hmacSha256Hex(apiSecret, json))
                 .bodyValue(json)
                 .retrieve()
+                .onStatus(s -> s.is4xxClientError() || s.is5xxServerError(),
+                        resp -> resp.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .map(b -> ApiException.upstream(
+                                        "CoinDCX futures API " + resp.statusCode().value()
+                                                + " " + path + ": " + b)))
                 .bodyToMono(JsonNode.class)
                 .timeout(Duration.ofSeconds(20))
                 .onErrorMap(e -> !(e instanceof ApiException),

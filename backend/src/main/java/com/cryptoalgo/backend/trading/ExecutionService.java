@@ -346,8 +346,10 @@ public class ExecutionService {
                                             .then(skip(bot, signal, reason));
                                 }
                                 final BigDecimal fillQty = qty;
+                                // Place market entry without TP/SL attached — invalid
+                                // protective prices vs LTP cause CoinDCX 400s. Guard sets them after.
                                 return futuresClient.placeOrder(key.apiKey(), key.apiSecret(), pair, side,
-                                                fillQty, leverage, margin, targetPrice, slPrice)
+                                                fillQty, leverage, margin, null, null)
                                         .flatMap(resp -> {
                                             TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(),
                                                     bot.userId(), bot.id(), signal.id(),
