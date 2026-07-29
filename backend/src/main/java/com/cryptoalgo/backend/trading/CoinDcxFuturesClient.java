@@ -5,7 +5,6 @@ import com.cryptoalgo.backend.config.AppProperties;
 import com.cryptoalgo.backend.market.CandleService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -179,16 +178,16 @@ public class CoinDcxFuturesClient {
                                      BigDecimal quantity, int leverage, String marginCurrency,
                                      BigDecimal takeProfit, BigDecimal stopLoss) {
         // CoinDCX: do NOT send time_in_force on market orders (docs: causes 400).
-        // Round qty — fractional dust often rejects on alt pairs.
-        BigDecimal qty = quantity.stripTrailingZeros();
-        if (qty.scale() > 4) {
-            qty = qty.setScale(4, java.math.RoundingMode.DOWN).stripTrailingZeros();
+        // Many INR alts require whole-unit qty ("divisible by 1.0").
+        BigDecimal qty = quantity.setScale(0, java.math.RoundingMode.DOWN);
+        if (qty.signum() <= 0) {
+            return Mono.error(ApiException.badRequest("futures qty rounds to zero"));
         }
         ObjectNode order = mapper.createObjectNode();
         order.put("side", side.toLowerCase());
         order.put("pair", pair);
         order.put("order_type", "market_order");
-        order.put("total_quantity", qty);
+        order.put("total_quantity", qty.longValueExact());
         order.put("leverage", leverage);
         order.put("notification", "no_notification");
         order.put("hidden", false);
