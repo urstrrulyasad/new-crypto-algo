@@ -48,6 +48,8 @@ public class PaperEvaluationService {
     private final Set<UUID> catchupStarted = ConcurrentHashMap.newKeySet();
     /** Avoid flooding audit_log every evaluate tick for the same BAD_BACKTEST. */
     private final Set<UUID> badBacktestLogged = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<UUID, Long> catchupLastStartedMs = new ConcurrentHashMap<>();
+    private static final long CATCHUP_COOLDOWN_MS = 5 * 60_000L;
 
     public PaperEvaluationService(StrategyRepository strategies, BotRepository bots,
                                   ExchangeKeyRepository keys, BacktestRepository backtests,
@@ -170,7 +172,11 @@ public class PaperEvaluationService {
      */
     private void kickPaperCatchup(Strategy strategy) {
         if (strategy.instrument() == null || strategy.sourceCode() == null) return;
+        long now = System.currentTimeMillis();
+        Long last = catchupLastStartedMs.get(strategy.id());
+        if (last != null && now - last < CATCHUP_COOLDOWN_MS) return;
         if (!catchupStarted.add(strategy.id())) return;
+        catchupLastStartedMs.put(strategy.id(), now);
         String tf = "5m";
         try {
             if (strategy.config() != null) {
@@ -190,7 +196,10 @@ public class PaperEvaluationService {
         );
         log.info("Paper catchup starting for {} ({})", strategy.instrument(), strategy.id());
         engine.paperCatchup(req)
-                .doOnNext(r -> log.info("Paper catchup done for {}: {}", strategy.instrument(), r))
+                .doOnNext(r -> {
+                    catchupStarted.remove(strategy.id());
+                    log.info("Paper catchup done for {}: {}", strategy.instrument(), r);
+                })
                 .doOnError(e -> {
                     catchupStarted.remove(strategy.id());
                     log.warn("Paper catchup failed for {}: {}", strategy.instrument(), e.getMessage());
