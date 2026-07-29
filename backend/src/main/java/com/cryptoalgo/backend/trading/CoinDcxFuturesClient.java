@@ -270,16 +270,16 @@ public class CoinDcxFuturesClient {
                 });
     }
 
-    /** Spot → futures wallet transfer. */
+    /** Spot → futures wallet transfer (INR or USDT). */
     public Mono<JsonNode> transferSpotToFutures(String apiKey, String apiSecret,
                                                 String currency, BigDecimal amount) {
         ObjectNode body = mapper.createObjectNode();
         body.put("timestamp", System.currentTimeMillis());
-        body.put("source_wallet_type", "spot");
-        body.put("destination_wallet_type", "futures");
-        body.put("currency_short_name", currency);
+        // deposit = spot → derivatives futures wallet
+        body.put("transfer_type", "deposit");
         body.put("amount", amount.doubleValue());
-        return signedPost("/exchange/v1/wallets/transfer", body, apiKey, apiSecret);
+        body.put("currency_short_name", currency);
+        return signedPost("/exchange/v1/derivatives/futures/wallets/transfer", body, apiKey, apiSecret);
     }
 
     private Mono<JsonNode> signedGet(String path, ObjectNode body, String apiKey, String apiSecret) {

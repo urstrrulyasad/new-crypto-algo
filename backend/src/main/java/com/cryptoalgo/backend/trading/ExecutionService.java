@@ -309,17 +309,16 @@ public class ExecutionService {
         String margin = "INR";
         return withKey(bot).flatMap(key -> futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
                 .flatMap(available0 -> {
+                    log.info("INR futures available before top-up: {}", available0);
                     // Ensure enough INR futures margin for min notional (~6 USDT * USDTINR / lev).
                     BigDecimal topUpTarget = BigDecimal.valueOf(200);
                     Mono<BigDecimal> funded = available0.compareTo(topUpTarget) >= 0
                             ? Mono.just(available0)
                             : futuresClient.transferSpotToFutures(key.apiKey(), key.apiSecret(), "INR",
-                                            topUpTarget.subtract(available0.max(BigDecimal.ZERO)))
+                                            topUpTarget.subtract(available0.max(BigDecimal.ZERO)).max(BigDecimal.ONE))
                                     .doOnNext(r -> log.info("Topped up INR futures wallet from spot: {}", r))
-                                    .onErrorResume(e -> {
-                                        log.warn("Spot→futures INR transfer failed: {}", e.getMessage());
-                                        return Mono.empty();
-                                    })
+                                    .doOnError(e -> log.warn("Spot→futures INR transfer failed: {}", e.getMessage()))
+                                    .onErrorResume(e -> Mono.empty())
                                     .then(futuresClient.availableInrBalance(key.apiKey(), key.apiSecret()))
                                     .defaultIfEmpty(available0);
                     return funded.flatMap(available -> futuresClient.usdtInrRate().flatMap(usdtInr -> {
