@@ -36,7 +36,7 @@ export default function Bots() {
 
   useEffect(() => {
     load()
-    api.get<Strategy[]>('/api/v1/strategies').then((s) => setStrategies(s.filter((x) => x.status === 'APPROVED')))
+    api.get<Strategy[]>('/api/v1/strategies').then((s) => setStrategies(s.filter((x) => x.status !== 'REJECTED')))
     api.get<Key[]>('/api/v1/keys').then(setKeys).catch(() => setKeys([]))
   }, [])
 
@@ -164,7 +164,7 @@ function CreateBot({ strategies, keys, onClose, onCreated }: {
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300">✕</button>
         </div>
         {strategies.length === 0 ? (
-          <p className="text-sm text-amber-300">You need an APPROVED strategy first — go to Strategy Lab.</p>
+          <p className="text-sm text-amber-300">No strategies yet — generate one in the AI Strategy Pipeline. Bots are normally created automatically.</p>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             <div>

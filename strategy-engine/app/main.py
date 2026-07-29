@@ -9,11 +9,13 @@ from datetime import datetime
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+import time
+
 from . import runner
 from .backtest import run_backtest
 from .config import INTERNAL_TOKEN
-from .data import fetch_candles
-from .llm import generate_strategy
+from .data import fetch_candles, normalize_timeframe, _TF_MS
+from .llm import LlmError, generate_strategy
 from .validation import load_strategy_class, validate_strategy_code
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -35,16 +37,21 @@ def check_token(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Bad internal token")
 
 
-class GenerateRequest(BaseModel):
+class ProviderConfig(BaseModel):
     provider_type: str
+    dialect: str
     base_url: str
-    model: str
     api_key: str
+    models: list[str]
+
+
+class GenerateRequest(BaseModel):
+    providers: list[ProviderConfig]
     goal: str
     timeframe: str = "1h"
     pairs: list[str] = ["B-BTC_USDT"]
     risk_profile: str = "balanced"
-    request_template: dict | None = None
+    market_data: str | None = None
 
 
 class ValidateRequest(BaseModel):
@@ -68,23 +75,66 @@ async def health():
 @app.post("/generate")
 async def generate(req: GenerateRequest, x_internal_token: str | None = Header(None)):
     check_token(x_internal_token)
-    result = await generate_strategy(
-        req.provider_type, req.base_url, req.model, req.api_key,
-        req.goal, req.timeframe, req.pairs, req.risk_profile, req.request_template)
-    source = result.get("source_code", "")
-    check = validate_strategy_code(source)
-    if check["valid"]:
+    if not req.providers:
+        raise HTTPException(status_code=400, detail="No AI providers supplied")
+    providers = [p.model_dump() for p in req.providers]
+    timeframe = normalize_timeframe(req.timeframe)
+
+    # Up to 3 attempts: static validation + a runtime smoke test on real
+    # candles; failures are fed back to the LLM so it can fix its own code.
+    feedback: str | None = None
+    result: dict = {}
+    check: dict = {"valid": False, "errors": ["generation not attempted"]}
+    all_attempts: list = []
+    for _ in range(3):
+        goal = req.goal if feedback is None else (
+            f"{req.goal}\n\nYour previous strategy failed with this error - "
+            f"generate a corrected version:\n{feedback}")
         try:
-            load_strategy_class(source)
-        except Exception as e:  # noqa: BLE001
-            check = {"valid": False, "errors": [f"Strategy failed to load: {e}"]}
+            result = await generate_strategy(
+                providers, goal, timeframe, req.pairs, req.risk_profile, req.market_data)
+        except LlmError as e:
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=f"LLM response parse error: {e}") from e
+        all_attempts.extend(result.get("attempts", []))
+        source = result.get("source_code", "")
+        check = validate_strategy_code(source)
+        if check["valid"]:
+            try:
+                await _smoke_test(source, timeframe, req.pairs[0])
+            except Exception as e:  # noqa: BLE001
+                check = {"valid": False,
+                         "errors": [f"Runtime smoke test on live candles failed: {e}"]}
+        if check["valid"]:
+            break
+        feedback = "; ".join(str(e) for e in check["errors"])
+        log.warning("Generated strategy failed checks, retrying: %s", feedback)
+
     return {
         "valid": check["valid"],
         "errors": check["errors"],
-        "source_code": source,
+        "source_code": result.get("source_code", ""),
         "config": result.get("config", {}),
         "explanation": result.get("explanation", ""),
+        "provider_used": result.get("provider_used"),
+        "model_used": result.get("model_used"),
+        "attempts": all_attempts,
     }
+
+
+async def _smoke_test(source: str, timeframe: str, pair: str) -> None:
+    """Run the strategy end-to-end on ~250 real candles to catch runtime bugs."""
+    strategy_cls = load_strategy_class(source)
+    tf_ms = _TF_MS.get(timeframe, 3_600_000)
+    now_ms = int(time.time() * 1000)
+    df = await fetch_candles(pair, timeframe, now_ms - tf_ms * 250, now_ms)
+    strategy = strategy_cls()
+    df = strategy.populate_indicators(df)
+    df = strategy.populate_entry_trend(df)
+    df = strategy.populate_exit_trend(df)
+    if "enter_long" not in df.columns:
+        raise ValueError("strategy never sets the enter_long column")
 
 
 @app.post("/validate")

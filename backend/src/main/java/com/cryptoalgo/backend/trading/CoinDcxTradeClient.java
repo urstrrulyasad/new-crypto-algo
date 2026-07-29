@@ -45,6 +45,33 @@ public class CoinDcxTradeClient {
         return signedPost("/exchange/v1/orders/create", body, apiKey, apiSecret);
     }
 
+    /**
+     * Stop-limit order (used as the exchange-side stop-loss leg): once
+     * stop_price triggers, a limit order at price_per_unit is placed.
+     */
+    public Mono<JsonNode> placeStopLimitOrder(String apiKey, String apiSecret, String market,
+                                              String side, BigDecimal totalQuantity,
+                                              BigDecimal stopPrice, BigDecimal limitPrice,
+                                              String clientOrderId) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("side", side.toLowerCase());
+        body.put("order_type", "stop_limit");
+        body.put("market", market);
+        body.put("total_quantity", totalQuantity);
+        body.put("stop_price", stopPrice);
+        body.put("price_per_unit", limitPrice);
+        body.put("timestamp", System.currentTimeMillis());
+        body.put("client_order_id", clientOrderId);
+        return signedPost("/exchange/v1/orders/create", body, apiKey, apiSecret);
+    }
+
+    public Mono<JsonNode> cancelOrder(String apiKey, String apiSecret, String exchangeOrderId) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("id", exchangeOrderId);
+        body.put("timestamp", System.currentTimeMillis());
+        return signedPost("/exchange/v1/orders/cancel", body, apiKey, apiSecret);
+    }
+
     public Mono<JsonNode> orderStatus(String apiKey, String apiSecret, String exchangeOrderId) {
         ObjectNode body = mapper.createObjectNode();
         body.put("id", exchangeOrderId);

@@ -5,10 +5,16 @@ import { Badge, Button, Card, Empty, Input, Label, PageTitle, Spinner } from '@/
 interface Provider {
   id: string
   providerType: string
-  name: string
-  baseUrl: string
-  model: string
+  displayName: string
+  models: string[]
+  priority: number
   enabled: boolean
+}
+
+interface CatalogEntry {
+  type: string
+  displayName: string
+  models: string[]
 }
 
 interface Tenant {
@@ -24,13 +30,6 @@ interface User {
   displayName: string
   role: string
   status: string
-}
-
-const PROVIDER_PRESETS: Record<string, { baseUrl: string; model: string }> = {
-  ANTHROPIC: { baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' },
-  GEMINI: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-pro' },
-  GROK: { baseUrl: 'https://api.x.ai', model: 'grok-4' },
-  OPENAI_COMPATIBLE: { baseUrl: 'https://api.openai.com', model: 'gpt-5' },
 }
 
 export default function Admin() {
@@ -49,78 +48,75 @@ export default function Admin() {
 
 function Providers() {
   const [providers, setProviders] = useState<Provider[] | null>(null)
-  const [type, setType] = useState('ANTHROPIC')
-  const [name, setName] = useState('')
-  const [baseUrl, setBaseUrl] = useState(PROVIDER_PRESETS.ANTHROPIC.baseUrl)
-  const [model, setModel] = useState(PROVIDER_PRESETS.ANTHROPIC.model)
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([])
+  const [type, setType] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [error, setError] = useState('')
 
   const load = () => api.get<Provider[]>('/api/v1/ai/providers').then(setProviders).catch(() => setProviders([]))
-  useEffect(() => { load() }, [])
-
-  function pickType(t: string) {
-    setType(t)
-    setBaseUrl(PROVIDER_PRESETS[t].baseUrl)
-    setModel(PROVIDER_PRESETS[t].model)
-  }
+  useEffect(() => {
+    load()
+    api.get<CatalogEntry[]>('/api/v1/ai/providers/catalog').then((c) => {
+      setCatalog(c)
+      setType((prev) => prev || c[0]?.type || '')
+    }).catch(() => setCatalog([]))
+  }, [])
 
   async function add() {
     setError('')
     try {
-      await api.post('/api/v1/ai/providers', { providerType: type, name, baseUrl, model, apiKey })
-      setName(''); setApiKey('')
+      await api.post('/api/v1/ai/providers', { providerType: type, apiKey })
+      setApiKey('')
       load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
     }
   }
 
+  const selected = catalog.find((c) => c.type === type)
+
   return (
     <Card>
-      <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">✦ AI Providers</h2>
+      <h2 className="mb-1 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">✦ AI Providers</h2>
+      <p className="mb-4 text-xs text-slate-500">
+        Pick a free provider and paste its API key — models, endpoints and rate-limit failover are built in.
+        On a rate limit the platform switches models, then falls through to the next provider.
+      </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <Label>Provider</Label>
-          <select value={type} onChange={(e) => pickType(e.target.value)} className="w-full rounded-xl border border-edge bg-surface px-4 py-2.5 text-sm text-slate-200">
-            <option value="ANTHROPIC">Claude (Anthropic)</option>
-            <option value="GEMINI">Gemini (Google)</option>
-            <option value="GROK">Grok (xAI)</option>
-            <option value="OPENAI_COMPATIBLE">OpenAI-compatible</option>
+          <select value={type} onChange={(e) => setType(e.target.value)} className="w-full rounded-xl border border-edge bg-surface px-4 py-2.5 text-sm text-slate-200">
+            {catalog.map((c) => <option key={c.type} value={c.type}>{c.displayName}</option>)}
           </select>
         </div>
         <div>
-          <Label>Display name</Label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Claude prod" />
-        </div>
-        <div>
-          <Label>Base URL</Label>
-          <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-        </div>
-        <div>
-          <Label>Model</Label>
-          <Input value={model} onChange={(e) => setModel(e.target.value)} />
-        </div>
-        <div className="sm:col-span-2">
           <Label>API key (stored encrypted, write-only)</Label>
-          <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-…" />
+          <Input type="password" autoComplete="off" autoCorrect="off" spellCheck={false} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-…" />
         </div>
       </div>
+      {selected && (
+        <p className="mt-2 text-xs text-slate-500">Model chain: {selected.models.join(' → ')}</p>
+      )}
       {error && <p className="mt-2 text-sm text-rose-400">{error}</p>}
-      <Button className="mt-4" onClick={add} disabled={!name || !apiKey}>Add provider</Button>
+      <Button className="mt-4" onClick={add} disabled={!type || !apiKey}>Save provider key</Button>
 
       <div className="mt-6 space-y-2">
         {providers === null ? <Spinner /> : providers.length === 0 ? (
-          <Empty message="No providers configured yet." />
+          <Empty message="No providers configured yet. Add at least one API key to enable AI strategy generation." />
         ) : (
           providers.map((p) => (
             <div key={p.id} className="flex items-center justify-between rounded-xl border border-edge/60 bg-surface/50 px-4 py-3">
               <div>
-                <div className="text-sm font-medium text-slate-200">{p.name}</div>
-                <div className="text-xs text-slate-500">{p.providerType} · {p.model}</div>
+                <div className="text-sm font-medium text-slate-200">{p.displayName}</div>
+                <div className="text-xs text-slate-500">{p.models.join(' → ')}</div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge tone={p.enabled ? 'success' : 'default'}>{p.enabled ? 'ENABLED' : 'DISABLED'}</Badge>
+                <button
+                  onClick={() => api.put(`/api/v1/ai/providers/${p.id}`, { providerType: p.providerType, enabled: !p.enabled }).then(load)}
+                  title="Toggle enabled"
+                >
+                  <Badge tone={p.enabled ? 'success' : 'default'}>{p.enabled ? 'ENABLED' : 'DISABLED'}</Badge>
+                </button>
                 <Button variant="danger" onClick={() => api.del(`/api/v1/ai/providers/${p.id}`).then(load)}>Delete</Button>
               </div>
             </div>

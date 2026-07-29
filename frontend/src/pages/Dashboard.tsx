@@ -118,22 +118,25 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.slice(0, 12).map((p) => (
-                    <tr key={p.id} className="border-b border-edge/40 text-slate-300">
-                      <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
-                      <td className="py-2.5 pr-4">
-                        <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
-                      </td>
-                      <td className="py-2.5 pr-4">{p.quantity}</td>
-                      <td className="py-2.5 pr-4">${Number(p.entryPrice).toLocaleString()}</td>
-                      <td className="py-2.5 pr-4">
-                        <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
-                      </td>
-                      <td className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {p.realizedPnl != null ? fmtMoney(p.realizedPnl) : '—'}
-                      </td>
-                    </tr>
-                  ))}
+                  {positions.slice(0, 12).map((p) => {
+                    const pnl = positionPnl(p, ticks)
+                    return (
+                      <tr key={p.id} className="border-b border-edge/40 text-slate-300">
+                        <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
+                        <td className="py-2.5 pr-4">
+                          <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
+                        </td>
+                        <td className="py-2.5 pr-4">{p.quantity}</td>
+                        <td className="py-2.5 pr-4">${Number(p.entryPrice).toLocaleString()}</td>
+                        <td className="py-2.5 pr-4">
+                          <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
+                        </td>
+                        <td className={`py-2.5 ${(pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {pnl != null ? fmtMoney(pnl) : '—'}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -148,6 +151,20 @@ function fmtMoney(v?: number | null) {
   if (v == null) return '—'
   const sign = v >= 0 ? '+' : '−'
   return `${sign}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+}
+
+function pairToMarket(pair: string) {
+  const dash = pair.indexOf('-')
+  const raw = dash >= 0 ? pair.slice(dash + 1) : pair
+  return raw.replace('_', '')
+}
+
+function positionPnl(p: Position, ticks: Record<string, Tick>): number | null {
+  if (p.status === 'CLOSED') return p.realizedPnl ?? null
+  const tick = ticks[pairToMarket(p.pair)]
+  if (!tick) return null
+  const dir = p.side === 'SHORT' ? -1 : 1
+  return (Number(tick.lastPrice) - Number(p.entryPrice)) * Number(p.quantity) * dir
 }
 
 function pnlAccent(v?: number | null): 'up' | 'down' | 'neutral' {

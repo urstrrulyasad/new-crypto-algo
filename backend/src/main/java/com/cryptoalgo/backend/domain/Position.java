@@ -11,4 +11,5 @@ import java.util.UUID;
 public record Position(@Id UUID id, UUID tenantId, UUID userId, UUID botId, String pair,
                        String side, BigDecimal quantity, BigDecimal entryPrice, BigDecimal exitPrice,
                        BigDecimal leverage, String status, BigDecimal realizedPnl,
+                       BigDecimal slPrice, BigDecimal targetPrice, String slOrderId,
                        Instant openedAt, Instant closedAt) {}

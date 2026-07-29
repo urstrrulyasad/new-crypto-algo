@@ -15,7 +15,7 @@ import time
 import httpx
 
 from .config import BACKEND_URL, INTERNAL_TOKEN, SIGNAL_POLL_SECONDS
-from .data import fetch_candles, _TF_MS
+from .data import fetch_candles, normalize_timeframe, _TF_MS
 from .validation import validate_strategy_code, load_strategy_class
 
 log = logging.getLogger("runner")
@@ -50,7 +50,7 @@ async def evaluate_all() -> None:
 
 async def evaluate_strategy(item: dict) -> None:
     source = item["sourceCode"]
-    timeframe = item.get("timeframe", "1h")
+    timeframe = normalize_timeframe(item.get("timeframe", "1h"))
     check = validate_strategy_code(source)
     if not check["valid"]:
         log.error("Active strategy %s failed validation: %s", item["strategyId"], check["errors"])

@@ -1,9 +1,6 @@
 package com.cryptoalgo.backend.market;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -11,12 +8,13 @@ import reactor.core.publisher.Mono;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Candle store: persists CoinDCX candles into Postgres (shared market data)
- * and serves them for charts, backtest data export and paper-fill pricing.
+ * Live candle access: fetches CoinDCX candles on demand (nothing is persisted)
+ * with a short in-memory TTL cache to absorb repeated chart requests.
  */
 @Service
 public class CandleService {
@@ -24,97 +22,73 @@ public class CandleService {
     public record Candle(Instant ts, BigDecimal open, BigDecimal high, BigDecimal low,
                          BigDecimal close, BigDecimal volume) {}
 
-    private static final Logger log = LoggerFactory.getLogger(CandleService.class);
+    private record CacheEntry(List<Candle> candles, long expiresAtMs) {}
+
+    private static final long TTL_MS = 30_000;
+    private static final int MAX_ENTRIES = 500;
 
     private final CoinDcxPublicClient client;
-    private final DatabaseClient db;
+    private final ConcurrentHashMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
 
-    public CandleService(CoinDcxPublicClient client, DatabaseClient db) {
+    public CandleService(CoinDcxPublicClient client) {
         this.client = client;
-        this.db = db;
     }
 
-    /** Fetch latest candles from CoinDCX and upsert them into the store. */
-    public Mono<Integer> refresh(String pair, String timeframe, Long startMs, Long endMs) {
-        return client.candles(pair, timeframe, startMs, endMs, 1000)
-                .flatMap(json -> upsertAll(pair, timeframe, json));
-    }
-
-    private Mono<Integer> upsertAll(String pair, String timeframe, JsonNode array) {
-        if (array == null || !array.isArray() || array.isEmpty()) return Mono.just(0);
-        List<Mono<Long>> inserts = new ArrayList<>();
-        for (JsonNode c : array) {
-            inserts.add(db.sql("""
-                            INSERT INTO candles(pair, timeframe, ts, open, high, low, close, volume)
-                            VALUES (:pair, :tf, :ts, :o, :h, :l, :c, :v)
-                            ON CONFLICT (pair, timeframe, ts) DO UPDATE
-                              SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                  close = EXCLUDED.close, volume = EXCLUDED.volume
-                            """)
-                    .bind("pair", pair)
-                    .bind("tf", timeframe)
-                    .bind("ts", Instant.ofEpochMilli(c.get("time").asLong()))
-                    .bind("o", new BigDecimal(c.get("open").asText()))
-                    .bind("h", new BigDecimal(c.get("high").asText()))
-                    .bind("l", new BigDecimal(c.get("low").asText()))
-                    .bind("c", new BigDecimal(c.get("close").asText()))
-                    .bind("v", new BigDecimal(c.get("volume").asText()))
-                    .fetch().rowsUpdated());
-        }
-        return Flux.concat(inserts).count().map(Long::intValue)
-                .doOnNext(n -> log.debug("Upserted {} candles for {} {}", n, pair, timeframe));
-    }
-
-    /** Serve candles from the store; if empty, backfill once from CoinDCX first. */
+    /** Candles for a range, ascending by time, straight from CoinDCX (cached briefly). */
     public Flux<Candle> get(String pair, String timeframe, Instant from, Instant to, int limit) {
-        Flux<Candle> query = db.sql("""
-                        SELECT ts, open, high, low, close, volume FROM candles
-                        WHERE pair = :pair AND timeframe = :tf AND ts >= :from AND ts <= :to
-                        ORDER BY ts ASC LIMIT :limit
-                        """)
-                .bind("pair", pair).bind("tf", timeframe)
-                .bind("from", from).bind("to", to).bind("limit", limit)
-                .map(this::mapRow).all();
-
-        return query.collectList().flatMapMany(rows -> {
-            if (!rows.isEmpty()) return Flux.fromIterable(rows);
-            return refresh(pair, timeframe, from.toEpochMilli(), to.toEpochMilli())
-                    .thenMany(query);
-        });
+        String key = pair + "|" + timeframe + "|" + bucket(from) + "|" + bucket(to) + "|" + limit;
+        CacheEntry hit = cache.get(key);
+        long now = System.currentTimeMillis();
+        if (hit != null && hit.expiresAtMs() > now) return Flux.fromIterable(hit.candles());
+        return client.candles(pair, timeframe, from.toEpochMilli(), to.toEpochMilli(),
+                        Math.min(limit, 1000))
+                .map(this::parse)
+                .doOnNext(candles -> {
+                    if (cache.size() >= MAX_ENTRIES) cache.clear();
+                    cache.put(key, new CacheEntry(candles, System.currentTimeMillis() + TTL_MS));
+                })
+                .flatMapMany(Flux::fromIterable);
     }
 
-    /** Latest close price from the store (used for paper fills as a fallback to live ticker). */
-    public Mono<BigDecimal> latestClose(String pair) {
-        return db.sql("""
-                        SELECT close FROM candles WHERE pair = :pair
-                        ORDER BY ts DESC LIMIT 1
-                        """)
-                .bind("pair", pair)
-                .map(row -> row.get("close", BigDecimal.class))
-                .one();
+    /** Recent candles as compact CSV (date,open,high,low,close,volume) for LLM prompts. */
+    public Mono<String> recentCsv(String pair, String timeframe, int count) {
+        long tfMs = timeframeMillis(timeframe);
+        long now = System.currentTimeMillis();
+        return get(pair, timeframe, Instant.ofEpochMilli(now - tfMs * count),
+                Instant.ofEpochMilli(now), count)
+                .collectList()
+                .map(candles -> {
+                    StringBuilder sb = new StringBuilder("date,open,high,low,close,volume\n");
+                    for (Candle c : candles) {
+                        sb.append(c.ts()).append(',').append(c.open().toPlainString()).append(',')
+                                .append(c.high().toPlainString()).append(',')
+                                .append(c.low().toPlainString()).append(',')
+                                .append(c.close().toPlainString()).append(',')
+                                .append(c.volume().toPlainString()).append('\n');
+                    }
+                    return sb.toString();
+                });
     }
 
-    private Candle mapRow(io.r2dbc.spi.Readable row) {
-        return new Candle(
-                row.get("ts", Instant.class),
-                row.get("open", BigDecimal.class),
-                row.get("high", BigDecimal.class),
-                row.get("low", BigDecimal.class),
-                row.get("close", BigDecimal.class),
-                row.get("volume", BigDecimal.class));
-    }
-
-    public Mono<Map<String, Object>> backfill(String pair, String timeframe, Instant from, Instant to) {
-        // CoinDCX returns max 1000 candles per call; walk the range forward.
-        long stepMs = timeframeMillis(timeframe) * 1000L;
-        List<long[]> windows = new ArrayList<>();
-        for (long cursor = from.toEpochMilli(); cursor < to.toEpochMilli(); cursor += stepMs) {
-            windows.add(new long[]{cursor, Math.min(cursor + stepMs, to.toEpochMilli())});
+    private List<Candle> parse(JsonNode array) {
+        List<Candle> out = new ArrayList<>();
+        if (array == null || !array.isArray()) return out;
+        for (JsonNode c : array) {
+            out.add(new Candle(
+                    Instant.ofEpochMilli(c.get("time").asLong()),
+                    new BigDecimal(c.get("open").asText()),
+                    new BigDecimal(c.get("high").asText()),
+                    new BigDecimal(c.get("low").asText()),
+                    new BigDecimal(c.get("close").asText()),
+                    new BigDecimal(c.get("volume").asText())));
         }
-        return Flux.fromIterable(windows)
-                .concatMap(w -> refresh(pair, timeframe, w[0], w[1]))
-                .reduce(0, Integer::sum)
-                .map(total -> Map.of("pair", pair, "timeframe", timeframe, "candles", total));
+        out.sort(Comparator.comparing(Candle::ts));
+        return out;
+    }
+
+    /** Bucket range boundaries to 30s so near-identical chart requests share a cache slot. */
+    private static long bucket(Instant t) {
+        return t.toEpochMilli() / TTL_MS;
     }
 
     static long timeframeMillis(String tf) {

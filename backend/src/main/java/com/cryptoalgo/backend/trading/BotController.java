@@ -66,8 +66,11 @@ public class BotController {
                 strategies.findByIdAndTenantId(req.strategyId(), p.tenantId())
                         .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
                         .flatMap(strategy -> {
-                            if (!"APPROVED".equals(strategy.status()))
-                                return Mono.error(ApiException.badRequest("Strategy must be APPROVED before running a bot"));
+                            if (mode.equals("LIVE") && !"LIVE_APPROVED".equals(strategy.status()))
+                                return Mono.error(ApiException.badRequest(
+                                        "LIVE bots need a LIVE_APPROVED strategy (auto-approved by the paper-trade gate)"));
+                            if (mode.equals("PAPER") && "REJECTED".equals(strategy.status()))
+                                return Mono.error(ApiException.badRequest("Strategy was rejected by validation"));
                             Mono<UUID> keyCheck = mode.equals("LIVE")
                                     ? keys.findByIdAndTenantId(req.exchangeKeyId(), p.tenantId())
                                         .filter(k -> k.userId().equals(p.userId()))

@@ -6,15 +6,23 @@ import pandas as pd
 
 from .config import COINDCX_PUBLIC
 
-_TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
-          "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
-          "8h": 28_800_000, "1d": 86_400_000, "3d": 259_200_000,
-          "1w": 604_800_000, "1M": 2_592_000_000}
+# CoinDCX public candles only serve these intervals (verified against the live API).
+_TF_MS = {"1m": 60_000, "15m": 900_000, "1h": 3_600_000, "1d": 86_400_000}
+
+# Anything else (e.g. an LLM emitting "5m") is coerced to the nearest supported interval.
+_TF_ALIASES = {"3m": "1m", "5m": "1m", "10m": "15m", "30m": "15m",
+               "2h": "1h", "4h": "1h", "6h": "1h", "8h": "1h", "12h": "1h",
+               "3d": "1d", "1w": "1d", "1M": "1d"}
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    if timeframe in _TF_MS:
+        return timeframe
+    return _TF_ALIASES.get(timeframe, "1h")
 
 
 async def fetch_candles(pair: str, timeframe: str, start_ms: int, end_ms: int) -> pd.DataFrame:
-    if timeframe not in _TF_MS:
-        raise ValueError(f"Unsupported timeframe {timeframe}")
+    timeframe = normalize_timeframe(timeframe)
     window = _TF_MS[timeframe] * 1000  # 1000 candles per request
     rows: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as client:

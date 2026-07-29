@@ -3,11 +3,14 @@ package com.cryptoalgo.backend.strategy;
 import com.cryptoalgo.backend.common.ApiException;
 import com.cryptoalgo.backend.config.AppProperties;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 
@@ -46,7 +49,44 @@ public class StrategyEngineClient {
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .timeout(timeout)
-                .onErrorMap(e -> !(e instanceof ApiException),
-                        e -> ApiException.upstream("Strategy engine call failed: " + e.getMessage()));
+                .onErrorMap(this::mapError);
+    }
+
+    private Throwable mapError(Throwable e) {
+        if (e instanceof ApiException) return e;
+        if (e instanceof WebClientResponseException w) {
+            String detail = extractDetail(w);
+            HttpStatus status = HttpStatus.resolve(w.getStatusCode().value());
+            if (status == null) status = HttpStatus.BAD_GATEWAY;
+            // Surface rate-limit / auth errors with their real status so the UI can react
+            if (w.getStatusCode().value() == 429)
+                return new ApiException(HttpStatus.TOO_MANY_REQUESTS, detail);
+            if (w.getStatusCode().value() == 401 || w.getStatusCode().value() == 403)
+                return new ApiException(HttpStatus.UNAUTHORIZED, detail);
+            return new ApiException(status.is4xxClientError() ? status : HttpStatus.BAD_GATEWAY, detail);
+        }
+        return ApiException.upstream("Strategy engine call failed: " + e.getMessage());
+    }
+
+    private String extractDetail(WebClientResponseException w) {
+        String body = w.getResponseBodyAsString(StandardCharsets.UTF_8);
+        if (body == null || body.isBlank()) return w.getMessage();
+        try {
+            // FastAPI errors: {"detail": "..."} or {"detail":[{...}]}
+            if (body.contains("\"detail\"")) {
+                int start = body.indexOf("\"detail\"");
+                String rest = body.substring(start + 8);
+                int colon = rest.indexOf(':');
+                String value = rest.substring(colon + 1).trim();
+                if (value.startsWith("\"")) {
+                    int end = value.indexOf('"', 1);
+                    if (end > 0) return value.substring(1, end);
+                }
+                return value.replaceAll("[\\[\\]{}\"]", "").trim();
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return body.length() > 400 ? body.substring(0, 400) : body;
     }
 }

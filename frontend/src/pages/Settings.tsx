@@ -49,11 +49,11 @@ export default function Settings() {
             </div>
             <div>
               <Label>API Key</Label>
-              <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="From CoinDCX API dashboard" />
+              <Input autoComplete="off" spellCheck={false} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="From CoinDCX API dashboard" />
             </div>
             <div>
               <Label>API Secret</Label>
-              <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Stored encrypted (AES-256-GCM)" />
+              <Input type="password" autoComplete="new-password" spellCheck={false} value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Stored encrypted (AES-256-GCM)" />
             </div>
             {error && <p className="text-sm text-rose-400">{error}</p>}
             <Button onClick={add} disabled={busy || !label || !apiKey || !apiSecret}>

@@ -39,6 +39,17 @@ app:
     password: ${SUPERADMIN_PASSWORD:ChangeMe123!}
   cors:
     allowed-origins: ${CORS_ORIGINS:http://localhost:5173}
+  pipeline:
+    # paper-trade gate: auto-approve for live once >= min-paper-trades closed
+    # with a win rate >= win-rate-threshold
+    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:10}
+    win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.75}
+    backtest-days: ${PIPELINE_BACKTEST_DAYS:30}
+    # defaults for auto-created bots / risk when the AI config omits them
+    paper-stake: ${PIPELINE_PAPER_STAKE:1000}
+    max-open-trades: ${PIPELINE_MAX_OPEN_TRADES:3}
+    default-stoploss: ${PIPELINE_DEFAULT_STOPLOSS:-0.05}
+    default-target-roi: ${PIPELINE_DEFAULT_TARGET_ROI:0.04}
 
 management:
   endpoints:

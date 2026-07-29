@@ -10,4 +10,6 @@ import java.util.UUID;
 public interface AiProviderRepository extends ReactiveCrudRepository<AiProvider, UUID> {
     Flux<AiProvider> findByTenantId(UUID tenantId);
     Mono<AiProvider> findByIdAndTenantId(UUID id, UUID tenantId);
+    Flux<AiProvider> findByTenantIdAndEnabledOrderByPriorityAsc(UUID tenantId, boolean enabled);
+    Mono<AiProvider> findByTenantIdAndProviderType(UUID tenantId, String providerType);
 }

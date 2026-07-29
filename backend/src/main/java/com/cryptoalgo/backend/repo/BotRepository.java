@@ -12,4 +12,5 @@ public interface BotRepository extends ReactiveCrudRepository<Bot, UUID> {
     Mono<Bot> findByIdAndTenantId(UUID id, UUID tenantId);
     Flux<Bot> findByStrategyIdAndStatus(UUID strategyId, String status);
     Flux<Bot> findByStatus(String status);
+    Flux<Bot> findByStrategyId(UUID strategyId);
 }

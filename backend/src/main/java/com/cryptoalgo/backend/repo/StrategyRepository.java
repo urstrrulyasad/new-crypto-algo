@@ -10,4 +10,5 @@ import java.util.UUID;
 public interface StrategyRepository extends ReactiveCrudRepository<Strategy, UUID> {
     Flux<Strategy> findByTenantIdAndUserIdOrderByCreatedAtDesc(UUID tenantId, UUID userId);
     Mono<Strategy> findByIdAndTenantId(UUID id, UUID tenantId);
+    Flux<Strategy> findByStatus(String status);
 }

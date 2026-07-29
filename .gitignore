@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 .idea/
 *.iml
+*.log
+.playwright-mcp/
+*.png

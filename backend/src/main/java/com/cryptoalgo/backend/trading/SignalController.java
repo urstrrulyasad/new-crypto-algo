@@ -4,6 +4,7 @@ import com.cryptoalgo.backend.common.ApiException;
 import com.cryptoalgo.backend.config.AppProperties;
 import com.cryptoalgo.backend.domain.Signal;
 import com.cryptoalgo.backend.repo.SignalRepository;
+import com.cryptoalgo.backend.repo.StrategyRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.postgresql.codec.Json;
 import jakarta.validation.constraints.NotBlank;
@@ -21,13 +22,15 @@ import java.util.UUID;
 /**
  * Internal endpoint receiving entry/exit signals from the Python strategy engine.
  * Authenticated by shared internal token; idempotent per signal key.
+ * Tenant is always resolved from the strategy row so a missing/wrong tenantId
+ * in the payload can never violate the NOT NULL constraint or cross tenants.
  */
 @RestController
 @RequestMapping("/api/v1/internal/signals")
 @Validated
 public class SignalController {
 
-    public record SignalRequest(@NotNull UUID tenantId, @NotNull UUID strategyId,
+    public record SignalRequest(UUID tenantId, @NotNull UUID strategyId,
                                 @NotBlank String idempotencyKey, @NotBlank String pair,
                                 @NotBlank String timeframe, @NotBlank String action,
                                 @NotNull BigDecimal price, @NotNull Instant candleTs,
@@ -35,15 +38,17 @@ public class SignalController {
 
     private final AppProperties props;
     private final SignalRepository signals;
+    private final StrategyRepository strategies;
     private final R2dbcEntityTemplate template;
     private final ExecutionService execution;
     private final ObjectMapper mapper;
 
     public SignalController(AppProperties props, SignalRepository signals,
-                            R2dbcEntityTemplate template, ExecutionService execution,
-                            ObjectMapper mapper) {
+                            StrategyRepository strategies, R2dbcEntityTemplate template,
+                            ExecutionService execution, ObjectMapper mapper) {
         this.props = props;
         this.signals = signals;
+        this.strategies = strategies;
         this.template = template;
         this.execution = execution;
         this.mapper = mapper;
@@ -57,13 +62,18 @@ public class SignalController {
         return signals.existsByIdempotencyKey(req.idempotencyKey())
                 .flatMap(exists -> {
                     if (exists) return Mono.just(Map.of("status", (Object) "DUPLICATE"));
-                    Signal signal = new Signal(UUID.randomUUID(), req.tenantId(), req.strategyId(),
-                            req.idempotencyKey(), req.pair(), req.timeframe(), req.action(),
-                            req.price(), req.candleTs(), toJson(req.payload()), Instant.now());
-                    return template.insert(signal)
-                            .flatMap(saved -> execution.process(saved)
-                                    .map(executed -> Map.of("status", (Object) "ACCEPTED",
-                                            "botsTriggered", executed)));
+                    return strategies.findById(req.strategyId())
+                            .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
+                            .flatMap(strategy -> {
+                                Signal signal = new Signal(UUID.randomUUID(), strategy.tenantId(),
+                                        strategy.id(), req.idempotencyKey(), req.pair(), req.timeframe(),
+                                        req.action(), req.price(), req.candleTs(),
+                                        toJson(req.payload()), Instant.now());
+                                return template.insert(signal)
+                                        .flatMap(saved -> execution.process(saved)
+                                                .map(executed -> Map.of("status", (Object) "ACCEPTED",
+                                                        "botsTriggered", executed)));
+                            });
                 });
     }
 
