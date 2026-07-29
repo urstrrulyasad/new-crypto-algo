@@ -39,7 +39,8 @@ public class MarketController {
                                               @RequestParam(defaultValue = "SPOT") String marketType) {
         if ("FUTURES".equalsIgnoreCase(marketType)) {
             String resolution = CoinDcxFuturesClient.toFuturesResolution(timeframe);
-            return futures.candles(pair, resolution, from, to).take(Math.min(limit, 10_000));
+            // Prefer newest candles when over limit (chunked fetch can exceed default 2000).
+            return futures.candles(pair, resolution, from, to).takeLast(Math.min(limit, 10_000));
         }
         return candles.get(pair, timeframe, from, to, Math.min(limit, 10_000));
     }
