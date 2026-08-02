@@ -1,5 +1,6 @@
 package com.quantalgotrade.crypto.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -11,11 +12,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.CandlestickChart
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -36,35 +37,45 @@ import com.quantalgotrade.crypto.data.AppContainer
 @Composable
 fun MainScaffold(container: AppContainer, onLoggedOut: () -> Unit) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
-    var screen by remember { mutableStateOf<AppScreen>(AppScreen.Tabs) }
+    var stack by remember { mutableStateOf(listOf<AppScreen>(AppScreen.Tabs)) }
     val labels = listOf("Home", "Strategies", "Paper", "Coins", "Settings")
     val icons = listOf(
         Icons.Filled.AccountBalanceWallet,
         Icons.Filled.CandlestickChart,
-        Icons.Filled.ShowChart,
+        Icons.AutoMirrored.Filled.ShowChart,
         Icons.Filled.CurrencyBitcoin,
         Icons.Filled.Settings,
     )
 
-    when (val dest = screen) {
+    fun push(screen: AppScreen) {
+        stack = stack + screen
+    }
+
+    fun pop() {
+        if (stack.size > 1) stack = stack.dropLast(1)
+    }
+
+    BackHandler(enabled = stack.size > 1) { pop() }
+
+    when (val dest = stack.last()) {
         is AppScreen.StrategyDetail -> {
             StrategyDetailScreen(
                 container = container,
                 strategyId = dest.strategyId,
-                onBack = { screen = AppScreen.Tabs },
+                onBack = { pop() },
                 onOpenChart = { pair, strategyId ->
-                    screen = AppScreen.Chart(pair = pair, mode = "strategy", strategyId = strategyId)
+                    push(AppScreen.Chart(pair = pair, mode = "strategy", strategyId = strategyId))
                 },
             )
         }
         is AppScreen.Chart -> {
-            ChartPortalScreen(
+            ChartScreen(
                 container = container,
                 pair = dest.pair,
                 mode = dest.mode,
                 strategyId = dest.strategyId,
                 positionId = dest.positionId,
-                onBack = { screen = AppScreen.Tabs },
+                onBack = { pop() },
             )
         }
         AppScreen.Tabs -> {
@@ -116,31 +127,23 @@ fun MainScaffold(container: AppContainer, onLoggedOut: () -> Unit) {
                             0 -> DashboardScreen(
                                 container = container,
                                 onOpenChart = { pair, positionId ->
-                                    screen = AppScreen.Chart(
-                                        pair = pair,
-                                        mode = "live",
-                                        positionId = positionId,
-                                    )
+                                    push(AppScreen.Chart(pair = pair, mode = "live", positionId = positionId))
                                 },
                             )
                             1 -> StrategiesScreen(
                                 container = container,
-                                onOpenStrategy = { id -> screen = AppScreen.StrategyDetail(id) },
+                                onOpenStrategy = { id -> push(AppScreen.StrategyDetail(id)) },
                             )
                             2 -> PaperScreen(
                                 container = container,
                                 onOpenChart = { pair, positionId ->
-                                    screen = AppScreen.Chart(
-                                        pair = pair,
-                                        mode = "paper",
-                                        positionId = positionId,
-                                    )
+                                    push(AppScreen.Chart(pair = pair, mode = "paper", positionId = positionId))
                                 },
                             )
                             3 -> CoinsScreen(
                                 container = container,
                                 onOpenChart = { pair ->
-                                    screen = AppScreen.Chart(pair = pair, mode = "clean")
+                                    push(AppScreen.Chart(pair = pair, mode = "clean"))
                                 },
                             )
                             else -> SettingsScreen(container, onLoggedOut)

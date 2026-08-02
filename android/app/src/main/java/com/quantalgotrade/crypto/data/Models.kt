@@ -65,6 +65,7 @@ data class PaperProgress(
     val totalPnl: Double = 0.0,
     val requiredTrades: Int = 0,
     val requiredWinRate: Double = 0.0,
+    val openPositions: Long = 0,
 )
 
 @Serializable
@@ -100,6 +101,23 @@ data class StrategyTrade(
 @Serializable
 data class InstrumentsResponse(
     val instruments: List<String> = emptyList(),
+)
+
+@Serializable
+data class Candle(
+    val ts: String,
+    val open: Double,
+    val high: Double,
+    val low: Double,
+    val close: Double,
+    val volume: Double = 0.0,
+)
+
+@Serializable
+data class PriceLine(
+    val price: Double,
+    val label: String,
+    val colorArgb: Long,
 )
 
 @Serializable

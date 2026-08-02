@@ -36,4 +36,14 @@ interface ApiService {
 
     @GET("/api/v1/market/futures/instruments")
     suspend fun futuresInstruments(): InstrumentsResponse
+
+    @GET("/api/v1/market/candles")
+    suspend fun candles(
+        @Query("pair") pair: String,
+        @Query("timeframe") timeframe: String = "5m",
+        @Query("from") from: String,
+        @Query("to") to: String,
+        @Query("limit") limit: Int = 400,
+        @Query("marketType") marketType: String = "FUTURES",
+    ): List<Candle>
 }

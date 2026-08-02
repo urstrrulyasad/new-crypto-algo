@@ -35,7 +35,8 @@ import java.util.UUID;
 public class StrategyController {
 
     public record PaperProgress(long closedTrades, long wins, double winRate,
-                                BigDecimal totalPnl, int requiredTrades, double requiredWinRate) {}
+                                BigDecimal totalPnl, int requiredTrades, double requiredWinRate,
+                                long openPositions) {}
     public record StrategyView(UUID id, UUID tenantId, String name, int version, String status,
                                String origin, String sourceCode, JsonNode config, String prompt,
                                String marketType, String instrument, String marginCurrency,
@@ -122,7 +123,7 @@ public class StrategyController {
                                 .flatMapMany(statsMap -> Flux.fromIterable(list)
                                         .map(s -> toView(s, statsMap.getOrDefault(s.id(),
                                                         new PaperStatsService.PaperStats(
-                                                                0, 0, BigDecimal.ZERO)),
+                                                                0, 0, BigDecimal.ZERO, 0)),
                                                 includeCode)));
                     });
         });
@@ -199,7 +200,8 @@ public class StrategyController {
                 s.marketType(), s.instrument(), s.marginCurrency(), s.createdAt(),
                 new PaperProgress(st.closedTrades(), st.wins(), st.winRate(), st.totalPnl(),
                         props.pipeline().minPaperTrades(),
-                        props.pipeline().winRateThreshold()));
+                        props.pipeline().winRateThreshold(),
+                        st.openPositions()));
     }
 
     private JsonNode readJson(Json json) {

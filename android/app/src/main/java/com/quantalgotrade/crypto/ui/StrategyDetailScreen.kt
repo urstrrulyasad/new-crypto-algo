@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
@@ -49,6 +50,7 @@ fun StrategyDetailScreen(
     onBack: () -> Unit,
     onOpenChart: (pair: String, strategyId: String) -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     var strategy by remember { mutableStateOf<Strategy?>(null) }
     var trades by remember { mutableStateOf<List<StrategyTrade>>(emptyList()) }
     var initialLoading by remember { mutableStateOf(true) }
@@ -113,7 +115,7 @@ fun StrategyDetailScreen(
                             Column(Modifier.padding(16.dp)) {
                                 Text(s.status.replace('_', ' '), color = scheme.primary, fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"}",
+                                    "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"} · ${s.paper?.openPositions ?: 0} open",
                                     color = scheme.onSurfaceVariant,
                                 )
                                 val paper = s.paper
@@ -131,7 +133,8 @@ fun StrategyDetailScreen(
                                     Text(
                                         String.format(
                                             Locale.US,
-                                            "Paper %d/%d · WR %.0f%% · PnL %.2f",
+                                            "Open %d · Paper %d/%d · WR %.0f%% · PnL %.2f",
+                                            paper.openPositions,
                                             paper.closedTrades,
                                             paper.requiredTrades,
                                             paper.winRate * 100,

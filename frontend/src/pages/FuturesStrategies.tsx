@@ -12,6 +12,7 @@ interface PaperProgress {
   totalPnl: number
   requiredTrades: number
   requiredWinRate: number
+  openPositions?: number
 }
 
 interface Strategy {
@@ -68,6 +69,7 @@ interface CoinBucket {
   instrument: string
   strategies: Strategy[]
   bestStatus: string
+  openPositions: number
 }
 
 function groupByCoin(list: Strategy[]): CoinBucket[] {
@@ -85,7 +87,13 @@ function groupByCoin(list: Strategy[]): CoinBucket[] {
   return [...map.entries()]
     .map(([instrument, strategies]) => {
       const sorted = [...strategies].sort((a, b) => rank(a.status) - rank(b.status))
-      return { instrument, strategies: sorted, bestStatus: sorted[0]?.status ?? 'GENERATED' }
+      const openPositions = strategies.reduce((n, s) => n + (s.paper?.openPositions ?? 0), 0)
+      return {
+        instrument,
+        strategies: sorted,
+        bestStatus: sorted[0]?.status ?? 'GENERATED',
+        openPositions,
+      }
     })
     .sort((a, b) => shortCoin(a.instrument).localeCompare(shortCoin(b.instrument)))
 }
@@ -163,6 +171,7 @@ export default function FuturesStrategies() {
                   <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
                     <span>
                       {c.strategies.length} strateg{c.strategies.length === 1 ? 'y' : 'ies'}
+                      {c.openPositions > 0 ? ` · ${c.openPositions} open` : ''}
                     </span>
                     <span className="text-cyan-400/80">Open →</span>
                   </div>
@@ -209,10 +218,14 @@ export default function FuturesStrategies() {
                       <span className="truncate font-medium text-slate-100">{s.name}</span>
                       <Badge tone={STATUS_TONE[s.status] ?? 'warn'}>{s.status.replace('_', ' ')}</Badge>
                     </div>
-                    <div className="mt-1 flex gap-2 text-xs text-slate-500">
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
                       <span>{s.marginCurrency ?? 'INR'}</span>
                       <span>·</span>
                       <span>{s.config?.timeframe ?? '1h'}</span>
+                      <span>·</span>
+                      <span className={(s.paper?.openPositions ?? 0) > 0 ? 'text-cyan-300' : ''}>
+                        {s.paper?.openPositions ?? 0} open
+                      </span>
                     </div>
                     {(s.status === 'PAPER_TRADING' || s.status === 'LIVE_APPROVED') && (
                       <PaperBar paper={s.paper} compact />
@@ -463,7 +476,11 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
               : `Paper gate: need ≥${Math.round(strategy.paper.requiredWinRate * 100)}% win rate over ${strategy.paper.requiredTrades} closed trades`}
           </div>
           <PaperBar paper={strategy.paper} />
-          <div className="mt-2 flex gap-4 text-xs text-slate-400">
+          <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-400">
+            <span>
+              Open:{' '}
+              <span className="text-cyan-300">{strategy.paper.openPositions ?? 0}</span>
+            </span>
             <span>
               Wins: <span className="text-emerald-400">{strategy.paper.wins}</span>
             </span>

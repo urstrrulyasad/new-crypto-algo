@@ -96,7 +96,7 @@ fun StrategiesScreen(
                                 )
                             }
                             Text(
-                                "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"}",
+                                "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"} · ${s.paper?.openPositions ?: 0} open",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = scheme.onSurfaceVariant,
                             )
@@ -115,7 +115,8 @@ fun StrategiesScreen(
                                 Text(
                                     String.format(
                                         Locale.US,
-                                        "Paper %d/%d · WR %.0f%% · PnL %.2f",
+                                        "Open %d · Paper %d/%d · WR %.0f%% · PnL %.2f",
+                                        paper.openPositions,
                                         paper.closedTrades,
                                         paper.requiredTrades,
                                         paper.winRate * 100,
