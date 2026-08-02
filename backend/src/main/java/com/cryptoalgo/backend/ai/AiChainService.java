@@ -50,7 +50,7 @@ public class AiChainService {
                     if (chain.isEmpty())
                         return Mono.error(ApiException.badRequest(
                                 "No AI provider configured. Ask your admin to add an API key "
-                                        + "for Gemini, Groq, OpenRouter, Mistral or Cerebras."));
+                                        + "for OpenAI, Gemini, Groq, OpenRouter, Mistral or Cerebras."));
                     return Mono.just(new ChainResult(chain, ids));
                 });
     }

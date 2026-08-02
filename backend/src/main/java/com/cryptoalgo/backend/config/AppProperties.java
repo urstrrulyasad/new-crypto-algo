@@ -24,6 +24,8 @@ public record AppProperties(
     public record Pipeline(
             int minPaperTrades,
             double winRateThreshold,
+            /** Paper PnL as % of paper stake required for LIVE (OR with win-rate). */
+            double minPaperProfitPct,
             int backtestDays,
             java.math.BigDecimal paperStake,
             int maxOpenTrades,
@@ -40,6 +42,11 @@ public record AppProperties(
             double maxWalletPct,
             long autoGenMs,
             /** Active (non-REJECTED/ARCHIVED) strategies allowed per instrument. */
-            int maxStrategiesPerInstrument
+            int maxStrategiesPerInstrument,
+            /**
+             * After REJECTED/ARCHIVED, do not regenerate the same instrument+style
+             * until this many hours pass (stops identical fallback thrash).
+             */
+            int regenCooldownHours
     ) {}
 }

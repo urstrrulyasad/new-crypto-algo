@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
-import { Badge, Button, Card, Empty, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface Bot {
   id: string
@@ -75,7 +75,7 @@ export default function FuturesPaper() {
   const openByBot = positions.filter((p) => p.status === 'OPEN')
 
   return (
-    <div>
+    <PageShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <PageTitle
           title="Futures Paper Trade"
@@ -159,7 +159,7 @@ export default function FuturesPaper() {
               </thead>
               <tbody>
                 {positions.slice(0, 30).map((p) => (
-                  <tr key={p.id} className="border-b border-edge/40 text-slate-300">
+                  <tr key={p.id} className="data-row border-b border-edge/40 text-slate-300">
                     <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
                     <td className="py-2.5 pr-4">
                       <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
@@ -183,6 +183,6 @@ export default function FuturesPaper() {
           </div>
         )}
       </Card>
-    </div>
+    </PageShell>
   )
 }

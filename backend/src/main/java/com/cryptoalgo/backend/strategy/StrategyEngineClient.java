@@ -30,7 +30,8 @@ public class StrategyEngineClient {
 
     /** Generate a freqtrade strategy via the configured LLM provider. */
     public Mono<JsonNode> generateStrategy(Map<String, Object> request) {
-        return post("/generate", request, Duration.ofMinutes(3));
+        // Fix-loop can run several LLM rounds + smoke tests.
+        return post("/generate", request, Duration.ofMinutes(10));
     }
 
     /** Validate strategy code (AST allowlist + sandbox load + lookahead check). */

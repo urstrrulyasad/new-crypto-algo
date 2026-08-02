@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { motion } from 'motion/react'
 import { api } from '@/lib/api'
-import { Card, Empty, Input, PageTitle, Spinner } from '@/components/ui'
+import { Card, Empty, Input, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface InstrumentsResp {
   marginCurrency: string
@@ -32,10 +33,10 @@ export default function FuturesCoins() {
   }, [pairs, q])
 
   return (
-    <div>
+    <PageShell>
       <PageTitle title="Coins" subtitle="INR futures instruments — clean live charts, no strategy overlays" />
 
-      <Card className="mt-4">
+      <Card className="mt-2" hover={false}>
         <Input
           placeholder="Filter pair (e.g. BTC)"
           value={q}
@@ -49,14 +50,20 @@ export default function FuturesCoins() {
           <Empty message={pairs.length === 0 ? 'No instruments returned.' : 'No match.'} />
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((pair) => (
-              <Link
+            {filtered.map((pair, i) => (
+              <motion.div
                 key={pair}
-                to={`/futures/chart/${encodeURIComponent(pair)}?mode=clean&timeframe=5m`}
-                className="rounded-xl border border-edge bg-surface/40 px-4 py-3 text-sm font-medium text-slate-200 transition-colors hover:border-cyan-500/50 hover:text-cyan-200"
+                initial={i < 48 ? { opacity: 0, y: 8 } : false}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: Math.min(i * 0.012, 0.35), duration: 0.35 }}
               >
-                {pair}
-              </Link>
+                <Link
+                  to={`/futures/chart/${encodeURIComponent(pair)}?mode=clean&timeframe=5m`}
+                  className="glass-hover block rounded-xl border border-edge bg-surface/40 px-4 py-3 text-sm font-medium text-slate-200 hover:text-cyan-200"
+                >
+                  {pair}
+                </Link>
+              </motion.div>
             ))}
           </div>
         )}
@@ -66,6 +73,6 @@ export default function FuturesCoins() {
           </p>
         )}
       </Card>
-    </div>
+    </PageShell>
   )
 }

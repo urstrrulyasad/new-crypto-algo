@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { motion } from 'motion/react'
 import { api } from '@/lib/api'
-import { Badge, Button, Card, Empty, PageTitle, Spinner, Stat } from '@/components/ui'
+import { Badge, Button, Callout, Card, Empty, PageShell, PageTitle, Spinner, Stat } from '@/components/ui'
 
 interface Summary {
   mode?: string
@@ -95,7 +96,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div>
+    <PageShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <PageTitle
           title="Dashboard"
@@ -106,11 +107,11 @@ export default function Dashboard() {
         </Button>
       </div>
 
-      <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-2 text-xs text-amber-200/90">
+      <Callout tone="warn">
         Paper trading lives on Strategies. This page never shows paper as account money.
-      </div>
+      </Callout>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
         <Stat
           label="CoinDCX INR"
           value={wallet ? fmtInr(wallet.available, false) : walletErr ? '—' : '…'}
@@ -148,10 +149,13 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.slice(0, 30).map((p) => (
-                    <tr
+                  {positions.slice(0, 30).map((p, i) => (
+                    <motion.tr
                       key={p.id}
-                      className="cursor-pointer border-b border-edge/40 text-slate-300 hover:bg-cyan-500/5"
+                      initial={{ opacity: 0, x: -6 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: Math.min(i * 0.03, 0.35) }}
+                      className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
                       onClick={() =>
                         navigate(
                           `/futures/chart/${encodeURIComponent(p.pair)}?mode=live&positionId=${p.id}&timeframe=5m`,
@@ -170,7 +174,7 @@ export default function Dashboard() {
                       <td className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {p.status === 'CLOSED' ? fmtInr(p.realizedPnl) : '—'}
                       </td>
-                    </tr>
+                    </motion.tr>
                   ))}
                 </tbody>
               </table>
@@ -199,10 +203,13 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.slice(0, 30).map((o) => (
-                    <tr
+                  {orders.slice(0, 30).map((o, i) => (
+                    <motion.tr
                       key={o.id}
-                      className="cursor-pointer border-b border-edge/40 text-slate-300 hover:bg-cyan-500/5"
+                      initial={{ opacity: 0, x: -6 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: Math.min(i * 0.03, 0.35) }}
+                      className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
                       onClick={() =>
                         navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
                       }
@@ -218,7 +225,7 @@ export default function Dashboard() {
                       <td className="max-w-[220px] truncate py-2.5 text-xs text-slate-500" title={o.error ?? ''}>
                         {o.error || `₹${Number(o.price).toLocaleString()}`}
                       </td>
-                    </tr>
+                    </motion.tr>
                   ))}
                 </tbody>
               </table>
@@ -226,7 +233,7 @@ export default function Dashboard() {
           )}
         </Card>
       </div>
-    </div>
+    </PageShell>
   )
 }
 

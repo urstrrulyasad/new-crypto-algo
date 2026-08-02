@@ -41,9 +41,11 @@ app:
   cors:
     allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   pipeline:
-    # LIVE needs 100 closed paper trades with ≥75 winners (75% WR) + quality backtest.
-    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:100}
-    win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.75}
+    # LIVE: paper sample + ≥60% win rate OR ≥60% paper profit (vs stake).
+    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:30}
+    win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.60}
+    # Paper ROI % vs stake (e.g. 600 PnL on 1000 stake = 60).
+    min-paper-profit-pct: ${PIPELINE_MIN_PAPER_PROFIT_PCT:60}
     backtest-days: ${PIPELINE_BACKTEST_DAYS:30}
     paper-stake: ${PIPELINE_PAPER_STAKE:1000}
     max-open-trades: ${PIPELINE_MAX_OPEN_TRADES:3}
@@ -53,15 +55,18 @@ app:
     max-instruments: ${PIPELINE_MAX_INSTRUMENTS:30}
     # Multiple complementary strategies per coin (mean-reversion / trend / breakout).
     max-strategies-per-instrument: ${PIPELINE_MAX_STRATEGIES_PER_INSTRUMENT:3}
-    min-backtest-trades: ${PIPELINE_MIN_BACKTEST_TRADES:15}
-    max-backtest-drawdown-pct: ${PIPELINE_MAX_BACKTEST_DD:45}
+    # Don't recreate the same coin+style right after reject/archive.
+    regen-cooldown-hours: ${PIPELINE_REGEN_COOLDOWN_HOURS:24}
+    min-backtest-trades: ${PIPELINE_MIN_BACKTEST_TRADES:10}
+    max-backtest-drawdown-pct: ${PIPELINE_MAX_BACKTEST_DD:50}
     # Backtest must also be profitable quality — not just enough trades / DD.
-    min-backtest-win-rate: ${PIPELINE_MIN_BACKTEST_WIN_RATE:0.55}
+    min-backtest-win-rate: ${PIPELINE_MIN_BACKTEST_WIN_RATE:0.50}
     min-backtest-profit-pct: ${PIPELINE_MIN_BACKTEST_PROFIT_PCT:0}
-    min-backtest-profit-factor: ${PIPELINE_MIN_BACKTEST_PF:1.0}
+    min-backtest-profit-factor: ${PIPELINE_MIN_BACKTEST_PF:0.95}
     max-live-bots: ${PIPELINE_MAX_LIVE_BOTS:10}
     max-wallet-pct: ${PIPELINE_MAX_WALLET_PCT:0.5}
-    auto-gen-ms: ${PIPELINE_AUTO_GEN_MS:300000}
+    # Continuous LLM generation cadence (2 minutes).
+    auto-gen-ms: ${PIPELINE_AUTO_GEN_MS:120000}
     evaluate-ms: ${PIPELINE_EVALUATE_MS:60000}
 
 management:

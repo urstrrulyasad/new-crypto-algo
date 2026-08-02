@@ -15,8 +15,12 @@ from . import runner
 from .backtest import run_backtest
 from .config import INTERNAL_TOKEN
 from .data import fetch_candles, normalize_timeframe, _TF_MS, _FUT_MS
-from .fallback_strategy import FALLBACK_CONFIG, FALLBACK_SOURCE
 from .llm import LlmError, generate_strategy
+from .pattern_library import (
+    infer_style_from_goal,
+    patterns_for_style,
+    style_hint_block,
+)
 from .validation import load_strategy_class, validate_strategy_code
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -93,28 +97,31 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
         raise HTTPException(status_code=400, detail="No AI providers supplied")
     providers = [p.model_dump() for p in req.providers]
     timeframe = normalize_timeframe(req.timeframe, req.market_type)
+    style = infer_style_from_goal(req.goal)
+    pattern_hint = style_hint_block(style)
 
-    # Up to 3 attempts: static validation + a runtime smoke test on real
-    # candles; failures are fed back to the LLM so it can fix its own code.
+    # Stricter fix loop: validation + smoke feedback back into the LLM.
     feedback: str | None = None
     result: dict = {}
     check: dict = {"valid": False, "errors": ["generation not attempted"]}
     all_attempts: list = []
     llm_exhausted = False
-    for _ in range(3):
-        goal = req.goal if feedback is None else (
-            f"{req.goal}\n\nYour previous strategy failed with this error - "
-            f"generate a corrected version:\n{feedback}")
+    max_llm_rounds = 5
+    for round_i in range(max_llm_rounds):
+        base_goal = f"{req.goal}\n\n{pattern_hint}"
+        goal = base_goal if feedback is None else (
+            f"{base_goal}\n\nYour previous strategy failed with this error — "
+            f"generate a corrected NEW version (change thresholds/windows):\n{feedback}")
         try:
             result = await generate_strategy(
                 providers, goal, timeframe, req.pairs, req.risk_profile, req.market_data)
         except LlmError as e:
-            log.warning("LLM chain failed (%s) — will use curated fallback", e)
+            log.warning("LLM chain exhausted (%s)", e)
             llm_exhausted = True
             check = {"valid": False, "errors": [str(e)]}
             break
         except ValueError as e:
-            log.warning("LLM parse error (%s) — will use curated fallback", e)
+            log.warning("LLM parse error (%s)", e)
             llm_exhausted = True
             check = {"valid": False, "errors": [f"LLM response parse error: {e}"]}
             break
@@ -128,32 +135,52 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
                 check = {"valid": False,
                          "errors": [f"Runtime smoke test on live candles failed: {e}"]}
         if check["valid"]:
+            log.info("LLM strategy passed smoke on round %s (%s/%s)",
+                     round_i + 1, result.get("provider_used"), result.get("model_used"))
             break
         feedback = "; ".join(str(e) for e in check["errors"])
-        log.warning("Generated strategy failed checks, retrying: %s", feedback)
+        log.warning("Generated strategy failed checks (round %s/%s): %s",
+                    round_i + 1, max_llm_rounds, feedback)
 
-    # Last resort: curated RSI/BB template so the pipeline can still paper-trade
-    # when the LLM is rate-limited, invalid, or signal-starved.
-    if not check["valid"] or llm_exhausted:
-        log.warning("Using curated futures fallback template")
-        check = validate_strategy_code(FALLBACK_SOURCE)
-        if check["valid"]:
-            try:
-                # Fallback only needs to load + run; thin alts rarely hit 3 signals
-                # on a 250-bar smoke window — don't reject the whole coin for that.
-                await _smoke_test(
-                    FALLBACK_SOURCE, timeframe, req.pairs[0], req.market_type,
-                    min_signals=0)
-            except Exception as e:  # noqa: BLE001
-                check = {"valid": False, "errors": [f"Fallback smoke test failed: {e}"]}
-        result = {
-            "source_code": FALLBACK_SOURCE,
-            "config": {**FALLBACK_CONFIG, "timeframe": timeframe},
-            "explanation": "Curated RSI+Bollinger fallback after LLM failure/rate-limit",
-            "provider_used": "TEMPLATE",
-            "model_used": "rsi-bb-ema-fallback",
-            "attempts": all_attempts,
-        }
+    # If LLM is down: try famous pattern library (smoke must pass).
+    # If patterns also fail: pause — do not return a failing template for the
+    # backend to persist as REJECTED.
+    paused = False
+    if not check["valid"]:
+        if llm_exhausted:
+            log.warning("LLM exhausted — trying famous pattern library for style=%s", style)
+            picked = await _try_pattern_library(
+                style, timeframe, req.pairs[0], req.market_type)
+            if picked is not None:
+                result, check = picked
+            else:
+                paused = True
+                check = {
+                    "valid": False,
+                    "errors": [
+                        "LLM providers rate-limited/unavailable and no famous pattern "
+                        "cleared smoke — auto-gen paused until providers recover"
+                    ],
+                }
+                result = {
+                    "source_code": "",
+                    "config": {"timeframe": timeframe},
+                    "explanation": "Paused: LLM exhausted and pattern library smoke failed",
+                    "provider_used": None,
+                    "model_used": None,
+                    "attempts": all_attempts,
+                }
+        else:
+            # LLM answered but never cleared smoke after retries — pause persist.
+            paused = True
+            result = {
+                "source_code": result.get("source_code", ""),
+                "config": result.get("config", {"timeframe": timeframe}),
+                "explanation": result.get("explanation", ""),
+                "provider_used": result.get("provider_used"),
+                "model_used": result.get("model_used"),
+                "attempts": all_attempts,
+            }
 
     return {
         "valid": check["valid"],
@@ -164,7 +191,37 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
         "provider_used": result.get("provider_used"),
         "model_used": result.get("model_used"),
         "attempts": all_attempts,
+        "llm_exhausted": llm_exhausted,
+        "paused": paused,
     }
+
+
+async def _try_pattern_library(
+        style: str, timeframe: str, pair: str, market_type: str
+) -> tuple[dict, dict] | None:
+    """Return (result, check) for the first famous pattern that passes smoke."""
+    for pattern in patterns_for_style(style):
+        src = pattern["source"]
+        cfg = {**pattern["config"], "timeframe": timeframe}
+        check = validate_strategy_code(src)
+        if not check["valid"]:
+            continue
+        try:
+            await _smoke_test(src, timeframe, pair, market_type, min_signals=1)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Pattern %s smoke failed: %s", pattern["id"], e)
+            continue
+        log.info("Pattern library hit: %s for %s", pattern["id"], pair)
+        result = {
+            "source_code": src,
+            "config": cfg,
+            "explanation": f"Famous pattern seed: {pattern['name']} (LLM unavailable)",
+            "provider_used": "PATTERN_LIBRARY",
+            "model_used": pattern["id"],
+            "attempts": [],
+        }
+        return result, check
+    return None
 
 
 async def _smoke_test(source: str, timeframe: str, pair: str, market_type: str = "FUTURES",

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, currentUser } from '@/lib/api'
-import { Badge, Button, Card, Empty, Input, Label, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Card, Empty, Input, Label, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface Provider {
   id: string
@@ -35,14 +35,14 @@ interface User {
 export default function Admin() {
   const me = currentUser()
   return (
-    <div>
+    <PageShell>
       <PageTitle title="Admin" subtitle="AI provider configuration, users and tenants" />
       <div className="grid gap-6 xl:grid-cols-2">
         <Providers />
         <Users />
         {me?.role === 'SUPER_ADMIN' && <Tenants />}
       </div>
-    </div>
+    </PageShell>
   )
 }
 
@@ -79,8 +79,9 @@ function Providers() {
     <Card>
       <h2 className="mb-1 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">✦ AI Providers</h2>
       <p className="mb-4 text-xs text-slate-500">
-        Pick a free provider and paste its API key — models, endpoints and rate-limit failover are built in.
+        Pick a provider and paste its API key — models, endpoints and rate-limit failover are built in.
         On a rate limit the platform switches models, then falls through to the next provider.
+        OpenAI needs its own key (sk-…) under “OpenAI”; an OpenAI key will not work when saved as OpenRouter.
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <div>

@@ -20,17 +20,7 @@ class AppContainer(context: Context) {
         explicitNulls = false
     }
 
-    val sessionStore = SessionStore(appContext, json).also { store ->
-        // seed default API if empty
-        runBlocking {
-            if (store.currentApiBase().isBlank()) {
-                store.saveApiBase(BuildConfig.DEFAULT_API_BASE)
-            }
-        }
-    }
-
-    @Volatile
-    private var retrofitBase: String = BuildConfig.DEFAULT_API_BASE
+    val sessionStore = SessionStore(appContext, json)
 
     private val authInterceptor = Interceptor { chain ->
         val token = runBlocking { sessionStore.currentAccessToken() }
@@ -51,42 +41,14 @@ class AppContainer(context: Context) {
         .addInterceptor(
             HttpLoggingInterceptor().apply {
                 level = HttpLoggingInterceptor.Level.BASIC
-            }
+            },
         )
         .build()
 
-    private fun buildApi(baseUrl: String): ApiService {
-        val normalized = baseUrl.trim().trimEnd('/') + "/"
-        return Retrofit.Builder()
-            .baseUrl(normalized)
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(ApiService::class.java)
-    }
-
-    @Volatile
-    private var apiInternal: ApiService = buildApi(BuildConfig.DEFAULT_API_BASE)
-
-    val api: ApiService
-        get() {
-            val base = runBlocking { sessionStore.currentApiBase() }
-            if (base != retrofitBase) {
-                synchronized(this) {
-                    if (base != retrofitBase) {
-                        retrofitBase = base
-                        apiInternal = buildApi(base)
-                    }
-                }
-            }
-            return apiInternal
-        }
-
-    suspend fun updateApiBase(base: String) {
-        sessionStore.saveApiBase(base)
-        synchronized(this) {
-            retrofitBase = base.trim().trimEnd('/')
-            apiInternal = buildApi(retrofitBase)
-        }
-    }
+    val api: ApiService = Retrofit.Builder()
+        .baseUrl(BuildConfig.DEFAULT_API_BASE.trim().trimEnd('/') + "/")
+        .client(client)
+        .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+        .build()
+        .create(ApiService::class.java)
 }

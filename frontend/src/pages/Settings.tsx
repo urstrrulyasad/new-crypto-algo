@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
-import { Badge, Button, Card, Empty, Input, Label, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Card, Empty, Input, Label, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface Key {
   id: string
@@ -37,7 +37,7 @@ export default function Settings() {
   }
 
   return (
-    <div>
+    <PageShell>
       <PageTitle title="API Keys" subtitle="Your CoinDCX credentials — encrypted at rest, never displayed again" />
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
@@ -90,6 +90,6 @@ export default function Settings() {
           )}
         </Card>
       </div>
-    </div>
+    </PageShell>
   )
 }

@@ -5,6 +5,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.CandlestickChart
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShowChart
+import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -21,10 +23,12 @@ import com.quantalgotrade.crypto.data.AppContainer
 @Composable
 fun MainScaffold(container: AppContainer, onLoggedOut: () -> Unit) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
-    val labels = listOf("Dashboard", "Strategies", "Settings")
+    val labels = listOf("Home", "Strategies", "Paper", "Coins", "Settings")
     val icons = listOf(
         Icons.Filled.AccountBalanceWallet,
         Icons.Filled.CandlestickChart,
+        Icons.Filled.ShowChart,
+        Icons.Filled.CurrencyBitcoin,
         Icons.Filled.Settings,
     )
 
@@ -46,6 +50,8 @@ fun MainScaffold(container: AppContainer, onLoggedOut: () -> Unit) {
             when (tab) {
                 0 -> DashboardScreen(container)
                 1 -> StrategiesScreen(container)
+                2 -> PaperScreen(container)
+                3 -> CoinsScreen(container)
                 else -> SettingsScreen(container, onLoggedOut)
             }
         }

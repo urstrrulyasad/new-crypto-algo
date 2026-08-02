@@ -44,6 +44,8 @@ public class PaperEvaluationService {
     private final SecretCrypto crypto;
     private final R2dbcEntityTemplate template;
     private final AuditService audit;
+    private final StrategyRegenCooldown regenCooldown;
+    private final StrategyPurgeService purge;
     private final AppProperties props;
     private final ObjectMapper mapper;
     private final Set<UUID> catchupStarted = ConcurrentHashMap.newKeySet();
@@ -60,7 +62,9 @@ public class PaperEvaluationService {
                                   PaperStatsService paperStats, StrategyPipelineService pipeline,
                                   StrategyEngineClient engine, CoinDcxFuturesClient futures,
                                   SecretCrypto crypto, R2dbcEntityTemplate template,
-                                  AuditService audit, AppProperties props, ObjectMapper mapper) {
+                                  AuditService audit, StrategyRegenCooldown regenCooldown,
+                                  StrategyPurgeService purge,
+                                  AppProperties props, ObjectMapper mapper) {
         this.strategies = strategies;
         this.bots = bots;
         this.keys = keys;
@@ -72,8 +76,19 @@ public class PaperEvaluationService {
         this.crypto = crypto;
         this.template = template;
         this.audit = audit;
+        this.regenCooldown = regenCooldown;
+        this.purge = purge;
         this.props = props;
         this.mapper = mapper;
+    }
+
+    /** LIVE when paper trades met and (WR ≥ 60% OR paper profit ≥ 60% of stake). */
+    private boolean passesLivePaperGate(PaperStatsService.PaperStats stats) {
+        if (stats.closedTrades() < props.pipeline().minPaperTrades()) return false;
+        double stake = props.pipeline().paperStake().doubleValue();
+        double profitPct = stake <= 0 ? 0 : (stats.totalPnl().doubleValue() / stake) * 100.0;
+        return stats.winRate() >= props.pipeline().winRateThreshold()
+                || profitPct >= props.pipeline().minPaperProfitPct();
     }
 
     @Scheduled(fixedDelayString = "${app.pipeline.evaluate-ms:60000}")
@@ -92,12 +107,10 @@ public class PaperEvaluationService {
         if ("LIVE_APPROVED".equals(strategy.status())) {
             return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
                 // Re-check current gate so config raises (e.g. 10 → 100) demote premature LIVE.
-                if (stats.closedTrades() < props.pipeline().minPaperTrades()
-                        || stats.winRate() < props.pipeline().winRateThreshold()) {
-                    log.warn("Demoting {} from LIVE_APPROVED — paper {}/{} trades wr={} (need {} @ {})",
+                if (!passesLivePaperGate(stats)) {
+                    log.warn("Demoting {} from LIVE_APPROVED — paper {}/{} trades wr={} pnl={}",
                             strategy.instrument(), stats.closedTrades(), props.pipeline().minPaperTrades(),
-                            stats.winRate(), props.pipeline().minPaperTrades(),
-                            props.pipeline().winRateThreshold());
+                            stats.winRate(), stats.totalPnl());
                     return bots.findByStrategyId(strategy.id())
                             .filter(b -> "LIVE".equals(b.mode()) && "RUNNING".equals(b.status()))
                             .flatMap(b -> bots.save(withStatus(b, "STOPPED")))
@@ -125,55 +138,70 @@ public class PaperEvaluationService {
                         });
             });
         }
-        return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
-            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
-                return kickPaperCatchup(strategy);
-            }
-            // Stop catchup once the trade-count gate is met — extending further
-            // into older history can dilute WR below the LIVE threshold.
-            if (stats.winRate() < props.pipeline().winRateThreshold()) {
-                log.info("Paper gate trades met for {} ({}/{}) but WR {} < {} — not promoting",
-                        strategy.instrument(), stats.closedTrades(), props.pipeline().minPaperTrades(),
-                        stats.winRate(), props.pipeline().winRateThreshold());
-                return Mono.empty();
-            }
-            return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
-                            strategy.tenantId(), strategy.id())
-                    .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
-                    .next()
-                    .flatMap(bt -> {
-                        JsonNode metrics = readMetrics(bt.metrics());
-                        if (!pipeline.passesLiveBacktestQuality(metrics)) {
-                            if (!badBacktestLogged.add(strategy.id())) {
-                                return Mono.just(false);
+        return paperStats.forStrategy(strategy.id()).flatMap(stats ->
+                backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
+                                strategy.tenantId(), strategy.id())
+                        .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
+                        .next()
+                        .flatMap(bt -> {
+                            JsonNode metrics = readMetrics(bt.metrics());
+                            if (!pipeline.passesLiveBacktestQuality(metrics)) {
+                                return archiveUnpromotable(strategy, stats, metrics);
                             }
-                            log.warn("LIVE skip BAD_BACKTEST for {} paperTrades={} wr={} btProfit={} btWr={}",
-                                    strategy.instrument(), stats.closedTrades(), stats.winRate(),
-                                    metrics.path("profit_total_pct").asText(),
-                                    metrics.path("win_rate").asText());
+                            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
+                                return kickPaperCatchup(strategy);
+                            }
+                            if (!passesLivePaperGate(stats)) {
+                                double stake = props.pipeline().paperStake().doubleValue();
+                                double profitPct = stake <= 0 ? 0
+                                        : (stats.totalPnl().doubleValue() / stake) * 100.0;
+                                log.info("Paper gate trades met for {} ({}/{}) but WR {} / profit {}% — need WR>={} or profit>={}%",
+                                        strategy.instrument(), stats.closedTrades(),
+                                        props.pipeline().minPaperTrades(),
+                                        stats.winRate(), String.format("%.1f", profitPct),
+                                        props.pipeline().winRateThreshold(),
+                                        props.pipeline().minPaperProfitPct());
+                                return Mono.empty();
+                            }
+                            badBacktestLogged.remove(strategy.id());
+                            return promote(strategy, stats);
+                        })
+                        .switchIfEmpty(Mono.defer(() -> {
+                            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
+                                return kickPaperCatchup(strategy);
+                            }
                             return audit.record(strategy.tenantId(), strategy.userId(),
-                                    "AUTO_LIVE_SKIPPED_BAD_BACKTEST", "STRATEGY", strategy.id(),
-                                    Map.of(
-                                            "paperWinRate", String.valueOf(stats.winRate()),
-                                            "paperTrades", String.valueOf(stats.closedTrades()),
-                                            "requiredPaperTrades", String.valueOf(props.pipeline().minPaperTrades()),
-                                            "backtestProfit", metrics.path("profit_total_pct").asText(),
-                                            "backtestWinRate", metrics.path("win_rate").asText(),
-                                            "backtestTrades", metrics.path("trades").asText(),
-                                            "backtestPF", metrics.path("profit_factor").asText(),
-                                            "reason", "backtest fails LIVE quality (WR/profit/PF/DD)",
-                                            "requiredPaperWinRate", String.valueOf(props.pipeline().winRateThreshold())
-                                    ))
-                                    .thenReturn(false);
-                        }
-                        badBacktestLogged.remove(strategy.id());
-                        return promote(strategy, stats).thenReturn(true);
-                    })
-                    .switchIfEmpty(audit.record(strategy.tenantId(), strategy.userId(),
-                            "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY", strategy.id(), Map.of())
-                            .thenReturn(false))
-                    .then();
-        });
+                                            "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY",
+                                            strategy.id(), Map.of())
+                                    .then();
+                        })));
+    }
+
+    private Mono<Void> archiveUnpromotable(Strategy strategy, PaperStatsService.PaperStats stats,
+                                           JsonNode metrics) {
+        if (!badBacktestLogged.add(strategy.id())) {
+            return Mono.empty();
+        }
+        String style = AutoStrategyScheduler.inferStyle(strategy);
+        log.warn("Archiving unpromotable {} ({}) — btProfit={} btWr={} paper={}/{}",
+                strategy.instrument(), style,
+                metrics.path("profit_total_pct").asText(),
+                metrics.path("win_rate").asText(),
+                stats.closedTrades(), props.pipeline().minPaperTrades());
+        // Soft cool this style only so other styles/coins keep generating.
+        regenCooldown.block(strategy.instrument(), style, java.time.Duration.ofHours(2));
+        UUID sid = strategy.id();
+        return audit.record(strategy.tenantId(), strategy.userId(),
+                        "STRATEGY_PURGED_BAD_BACKTEST", "STRATEGY", sid,
+                        Map.of(
+                                "style", style,
+                                "paperTrades", String.valueOf(stats.closedTrades()),
+                                "backtestProfit", metrics.path("profit_total_pct").asText(),
+                                "backtestWinRate", metrics.path("win_rate").asText(),
+                                "backtestPF", metrics.path("profit_factor").asText(),
+                                "reason", "backtest cannot meet LIVE quality — purged"
+                        ))
+                .then(purge.purgeStrategy(sid));
     }
 
     /**
@@ -197,14 +225,6 @@ public class PaperEvaluationService {
                     JsonNode metrics = readMetrics(bt.metrics());
                     if (!pipeline.passesLiveBacktestQuality(metrics)) {
                         catchupStarted.remove(strategy.id());
-                        return Mono.empty();
-                    }
-                    // Defer weak-but-passing edges so a strong quality passer
-                    // (e.g. F +25% bt) fills the 100-trade gate first.
-                    if (metrics.path("profit_total_pct").asDouble(0) < 5.0) {
-                        catchupStarted.remove(strategy.id());
-                        log.debug("Deferring catchup for {} — bt profit {} < 5%",
-                                strategy.instrument(), metrics.path("profit_total_pct").asText());
                         return Mono.empty();
                     }
                     if (!catchupBusy.compareAndSet(false, true)) {

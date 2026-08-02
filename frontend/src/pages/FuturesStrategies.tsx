@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
-import { Badge, Button, Card, Empty, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Callout, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
 import { CandleChart, type Candle, type TradeMarker } from '@/components/CandleChart'
 
 interface PaperProgress {
@@ -115,17 +115,17 @@ export default function FuturesStrategies() {
     coins && selectedCoin ? coins.find((c) => c.instrument === selectedCoin)?.strategies ?? [] : []
 
   return (
-    <div>
+    <PageShell>
       <PageTitle
         title="Futures Strategies"
         subtitle="Pick a coin, then inspect the AI strategies generated for it"
       />
 
-      <div className="mb-5 rounded-xl border border-edge/60 bg-surface/40 px-4 py-3 text-sm text-slate-400">
+      <Callout tone="info">
         Strategies are generated automatically per coin. Backtest is a smoke screen into paper.
-        LIVE requires ≥75 profitable closed paper trades out of 100 (75% WR) plus a profitable
-        quality backtest (win rate, profit factor, positive PnL).
-      </div>
+        LIVE when paper hits ≥60% win rate or ≥60% profit vs stake (plus enough trades and a
+        quality backtest). Rejected/archived strategies are removed automatically.
+      </Callout>
 
       {!selectedCoin ? (
         <div>
@@ -140,24 +140,31 @@ export default function FuturesStrategies() {
                 <motion.button
                   key={c.instrument}
                   type="button"
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: Math.min(i * 0.03, 0.3) }}
+                  initial={{ opacity: 0, y: 14, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  whileHover={{ y: -3, scale: 1.01 }}
+                  whileTap={{ scale: 0.99 }}
+                  transition={{ delay: Math.min(i * 0.03, 0.3), duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
                   onClick={() => {
                     setSelectedCoin(c.instrument)
                     setSelected(c.strategies[0] ?? null)
                   }}
-                  className="glass rounded-2xl p-4 text-left transition-all duration-200 hover:border-cyan-500/40"
+                  className="glass glass-hover rounded-2xl p-4 text-left"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-slate-100">{shortCoin(c.instrument)}</span>
+                    <span className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
+                      {shortCoin(c.instrument)}
+                    </span>
                     <Badge tone={STATUS_TONE[c.bestStatus] ?? 'warn'}>
                       {c.bestStatus.replace('_', ' ')}
                     </Badge>
                   </div>
                   <div className="mt-1 text-xs text-slate-500">{c.instrument}</div>
-                  <div className="mt-2 text-xs text-slate-400">
-                    {c.strategies.length} strateg{c.strategies.length === 1 ? 'y' : 'ies'}
+                  <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+                    <span>
+                      {c.strategies.length} strateg{c.strategies.length === 1 ? 'y' : 'ies'}
+                    </span>
+                    <span className="text-cyan-400/80">Open →</span>
                   </div>
                 </motion.button>
               ))}
@@ -195,7 +202,8 @@ export default function FuturesStrategies() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: Math.min(i * 0.04, 0.35) }}
                     onClick={() => setSelected(s)}
-                    className={`glass w-full rounded-2xl p-4 text-left transition-all duration-200 hover:border-cyan-500/40 ${selected?.id === s.id ? 'border-cyan-500/60 ring-1 ring-cyan-500/30' : ''}`}
+                    whileHover={{ x: 2 }}
+                    className={`glass glass-hover w-full rounded-2xl p-4 text-left ${selected?.id === s.id ? 'border-cyan-500/60 ring-1 ring-cyan-500/30' : ''}`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate font-medium text-slate-100">{s.name}</span>
@@ -226,7 +234,7 @@ export default function FuturesStrategies() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   )
 }
 
@@ -234,12 +242,16 @@ function PipelineStepper({ status, reason }: { status: string; reason?: string }
   if (status === 'REJECTED') {
     return (
       <p className="text-sm text-rose-400">
-        Rejected — {reason || 'failed validation or backtest quality gate (drawdown / trade count).'}
+        Rejected — {reason || 'failed validation or backtest smoke gate (too few trades / high drawdown). New strategies will regenerate for this coin.'}
       </p>
     )
   }
   if (status === 'ARCHIVED') {
-    return <p className="text-sm text-slate-400">Archived — instrument delisted or superseded.</p>
+    return (
+      <p className="text-sm text-slate-400">
+        Archived — retired (failed backtest quality gate, unpromotable paper, delisted, or superseded).
+      </p>
+    )
   }
   const current = PIPELINE_STEPS.indexOf(status)
   return (
@@ -326,6 +338,7 @@ interface LiveSkip {
 
 function StrategyDetail({ strategy }: { strategy: Strategy }) {
   const [tab, setTab] = useState<'backtest' | 'paper' | 'orders' | 'code'>('paper')
+  const [detail, setDetail] = useState<Strategy>(strategy)
   const [backtests, setBacktests] = useState<Backtest[]>([])
   const [active, setActive] = useState<Backtest | null>(null)
   const [candles, setCandles] = useState<Candle[]>([])
@@ -357,7 +370,12 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
     activeRef.current = null
     setActive(null)
     setCandles([])
+    setDetail(strategy)
     setTab(strategy.status === 'GENERATED' || strategy.status === 'BACKTESTED' ? 'backtest' : 'paper')
+    // List payload omits sourceCode for speed — load full row for the code tab.
+    api.get<Strategy>(`/api/v1/strategies/${strategy.id}`)
+      .then(setDetail)
+      .catch(() => setDetail(strategy))
     loadBacktests()
     loadHistory()
     const poll = setInterval(() => {
@@ -482,7 +500,7 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
 
       {tab === 'code' && (
         <pre className="max-h-[480px] overflow-auto rounded-xl border border-edge bg-black/40 p-4 text-xs leading-relaxed text-emerald-200/90">
-          {strategy.sourceCode}
+          {detail.sourceCode || 'Loading source…'}
         </pre>
       )}
 

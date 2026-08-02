@@ -43,13 +43,17 @@ public class AutoStrategyScheduler {
     private final BacktestRepository backtests;
     private final CoinDcxFuturesClient futures;
     private final StrategyPipelineService pipeline;
+    private final StrategyRegenCooldown regenCooldown;
+    private final StrategyPurgeService purge;
     private final AppProperties props;
 
     public AutoStrategyScheduler(TenantRepository tenants, UserRepository users,
                                  AiProviderRepository providers, StrategyRepository strategies,
                                  BotRepository bots, BacktestRepository backtests,
                                  CoinDcxFuturesClient futures,
-                                 StrategyPipelineService pipeline, AppProperties props) {
+                                 StrategyPipelineService pipeline,
+                                 StrategyRegenCooldown regenCooldown, StrategyPurgeService purge,
+                                 AppProperties props) {
         this.tenants = tenants;
         this.users = users;
         this.providers = providers;
@@ -58,6 +62,8 @@ public class AutoStrategyScheduler {
         this.backtests = backtests;
         this.futures = futures;
         this.pipeline = pipeline;
+        this.regenCooldown = regenCooldown;
+        this.purge = purge;
         this.props = props;
     }
 
@@ -187,7 +193,7 @@ public class AutoStrategyScheduler {
                                 b.stakeAmount(), b.maxOpenTrades(), b.leverage(), "STOPPED",
                                 b.killSwitch(), b.marginCurrency(), b.createdAt(),
                                 java.time.Instant.now())))
-                        .then(strategies.save(StrategyPipelineService.copy(s, "ARCHIVED"))))
+                        .then(purge.purgeStrategy(s.id())))
                 .then();
     }
 
@@ -222,29 +228,48 @@ public class AutoStrategyScheduler {
                     java.util.Map<String, Set<String>> usedStyles = new java.util.HashMap<>();
                     for (Strategy s : existing) {
                         if (s.instrument() == null) continue;
-                        if ("REJECTED".equals(s.status()) || "ARCHIVED".equals(s.status())) continue;
+                        String style = inferStyle(s);
+                        // Terminal rows do not occupy active slots and do not seed
+                        // long cooldowns (that blocked continuous LLM generation).
+                        if ("REJECTED".equalsIgnoreCase(s.status())
+                                || "ARCHIVED".equalsIgnoreCase(s.status())) {
+                            continue;
+                        }
                         activeCount.merge(s.instrument(), 1, Integer::sum);
-                        usedStyles.computeIfAbsent(s.instrument(), k -> new HashSet<>())
-                                .add(inferStyle(s));
+                        usedStyles.computeIfAbsent(s.instrument(), k -> new HashSet<>()).add(style);
                     }
                     record Job(String instrument, String style) {}
                     List<Job> queue = new java.util.ArrayList<>();
                     for (String inst : top) {
                         int n = activeCount.getOrDefault(inst, 0);
                         if (n >= maxPer) continue;
+                        if (styles.stream().allMatch(st -> regenCooldown.isBlocked(inst, st))) {
+                            log.info("Skip {} — soft regen cooldown active", inst);
+                            continue;
+                        }
                         Set<String> have = usedStyles.getOrDefault(inst, Set.of());
                         for (String style : styles) {
                             if (have.contains(style)) continue;
+                            if (regenCooldown.isBlocked(inst, style)) {
+                                log.info("Skip {} / {} — soft regen cooldown", inst, style);
+                                continue;
+                            }
                             queue.add(new Job(inst, style));
-                            break; // one new style per instrument per pass through top list
+                            break; // one new style per instrument per pass
                         }
                     }
                     // Prefer coins with fewer strategies, then list order.
                     queue.sort((a, b) -> Integer.compare(
                             activeCount.getOrDefault(a.instrument(), 0),
                             activeCount.getOrDefault(b.instrument(), 0)));
+                    if (queue.isEmpty()) {
+                        log.info("Auto-gen: nothing to create (active slots full or soft cooldown)");
+                        return Mono.empty();
+                    }
+                    // Continuous generation: up to 2 instruments per tick when LLMs are healthy.
+                    int batch = Math.min(2, queue.size());
                     return Flux.fromIterable(queue)
-                            .take(1)
+                            .take(batch)
                             .concatMap(job -> {
                                 log.info("Auto-generating FUTURES {} strategy for {} ({}/{} active)",
                                         job.style(), job.instrument(),
@@ -260,27 +285,49 @@ public class AutoStrategyScheduler {
                 });
     }
 
-    /** Best-effort style tag from name/config/prompt for deduping multi-strategy slots. */
-    private static String inferStyle(Strategy s) {
-        String blob = ((s.name() == null ? "" : s.name()) + " "
-                + (s.prompt() == null ? "" : s.prompt())).toLowerCase(java.util.Locale.ROOT);
+    /**
+     * Resolve style for slot/cooldown dedupe.
+     * Prefer config.strategy_style and name labels — never scan the full prompt
+     * (goals say "do not chase trends" / "momentum" and mis-tag MR as Trend/Breakout).
+     */
+    static String inferStyle(Strategy s) {
         try {
             if (s.config() != null) {
-                blob += " " + s.config().asString().toLowerCase(java.util.Locale.ROOT);
+                String cfg = s.config().asString();
+                String fromCfg = extractJsonString(cfg, "strategy_style");
+                if (fromCfg != null && !fromCfg.isBlank()) {
+                    return StrategyPipelineService.normalizeStyle(fromCfg);
+                }
             }
         } catch (Exception ignored) {
-            // ignore
+            // fall through
         }
-        if (blob.contains("breakout") || blob.contains("momentum")) {
-            return "breakout-momentum";
-        }
-        if (blob.contains("trend")) {
-            return "trend-following";
-        }
-        if (blob.contains("mean-reversion") || blob.contains(" · mr") || blob.contains("mean reversion")) {
+        String name = (s.name() == null ? "" : s.name()).toLowerCase(java.util.Locale.ROOT);
+        if (name.contains(" · mr") || name.endsWith(" mr") || name.contains(" mean-reversion")) {
             return "mean-reversion";
         }
-        // Legacy single strategy per coin → treat as mean-reversion slot.
+        if (name.contains(" · trend") || name.contains(" · tf")) {
+            return "trend-following";
+        }
+        if (name.contains(" · breakout") || name.contains(" · bm") || name.contains(" · momentum")) {
+            return "breakout-momentum";
+        }
+        // Legacy unnamed futures row → mean-reversion slot.
         return "mean-reversion";
+    }
+
+    /** Tiny key extract so scheduler does not need a full JSON parse dependency path. */
+    private static String extractJsonString(String json, String key) {
+        if (json == null || key == null) return null;
+        String needle = "\"" + key + "\"";
+        int i = json.indexOf(needle);
+        if (i < 0) return null;
+        int colon = json.indexOf(':', i + needle.length());
+        if (colon < 0) return null;
+        int q1 = json.indexOf('"', colon + 1);
+        if (q1 < 0) return null;
+        int q2 = json.indexOf('"', q1 + 1);
+        if (q2 < 0) return null;
+        return json.substring(q1 + 1, q2);
     }
 }

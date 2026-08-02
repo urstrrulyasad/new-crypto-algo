@@ -53,6 +53,8 @@ public class StrategyPipelineService {
     private final R2dbcEntityTemplate template;
     private final ObjectMapper mapper;
     private final AuditService audit;
+    private final StrategyRegenCooldown regenCooldown;
+    private final StrategyPurgeService purge;
     private final AppProperties props;
 
     public StrategyPipelineService(AiChainService aiChain, StrategyEngineClient engine,
@@ -60,7 +62,9 @@ public class StrategyPipelineService {
                                    StrategyRepository strategies,
                                    BacktestRepository backtests, BotRepository bots,
                                    R2dbcEntityTemplate template,
-                                   ObjectMapper mapper, AuditService audit, AppProperties props) {
+                                   ObjectMapper mapper, AuditService audit,
+                                   StrategyRegenCooldown regenCooldown, StrategyPurgeService purge,
+                                   AppProperties props) {
         this.aiChain = aiChain;
         this.engine = engine;
         this.futures = futures;
@@ -71,6 +75,8 @@ public class StrategyPipelineService {
         this.template = template;
         this.mapper = mapper;
         this.audit = audit;
+        this.regenCooldown = regenCooldown;
+        this.purge = purge;
         this.props = props;
     }
 
@@ -115,48 +121,85 @@ public class StrategyPipelineService {
                             })
                             .flatMap(result -> {
                                 boolean valid = result.path("valid").asBoolean(false);
+                                boolean paused = result.path("paused").asBoolean(false);
+                                boolean llmExhausted = result.path("llm_exhausted").asBoolean(false);
                                 String providerUsed = result.path("provider_used").asText(null);
+                                String errSummary = summarizeErrors(result.path("errors"));
+                                // Never persist REJECTED spam — only save smoke-passing strategies.
+                                if (!valid) {
+                                    if (paused || llmExhausted) {
+                                        // Soft pause so we keep retrying as soon as LLMs recover.
+                                        blockInstrumentRegen(instrument, Duration.ofMinutes(30));
+                                        log.warn("Generate paused for {} / {} — {}",
+                                                instrument, styleKey, errSummary);
+                                    } else {
+                                        regenCooldown.block(instrument, styleKey, Duration.ofHours(2));
+                                        log.warn("Generate discarded (failed smoke) for {} / {} — {}",
+                                                instrument, styleKey, errSummary);
+                                    }
+                                    return audit.record(tenantId, userId,
+                                                    "STRATEGY_GENERATE_SKIPPED", "STRATEGY", null,
+                                                    Map.of("instrument", instrument,
+                                                            "style", styleKey,
+                                                            "paused", String.valueOf(paused || llmExhausted),
+                                                            "reason", errSummary))
+                                            .then(Mono.empty());
+                                }
                                 UUID providerId = providerUsed == null ? null
                                         : chain.providerIds().get(providerUsed);
                                 JsonNode config = enrich(result.path("config"), timeframe, pairs,
                                         result.path("model_used").asText(null), providerUsed,
-                                        valid ? null : result.path("errors"), styleKey,
-                                        brief.sentiment());
+                                        null, styleKey, brief.sentiment());
+                                String origin = "PATTERN_LIBRARY".equals(providerUsed)
+                                        ? "PATTERN_LIBRARY" : "AI_GENERATED";
                                 Strategy s = new Strategy(UUID.randomUUID(), tenantId, userId,
                                         name, 1, null, result.path("source_code").asText(""),
-                                        Json.of(config.toString()), valid ? "GENERATED" : "REJECTED",
-                                        "AI_GENERATED", providerId, goal,
+                                        Json.of(config.toString()), "GENERATED",
+                                        origin, providerId, goal,
                                         "FUTURES", instrument, "INR", Instant.now());
                                 return template.insert(s)
                                         .then(audit.record(tenantId, userId,
-                                                valid ? "STRATEGY_GENERATED" : "STRATEGY_REJECTED",
-                                                "STRATEGY", s.id(),
+                                                "STRATEGY_GENERATED", "STRATEGY", s.id(),
                                                 Map.of("instrument", instrument,
                                                         "style", styleKey,
                                                         "sentiment", brief.sentiment(),
                                                         "provider", providerUsed == null ? "?" : providerUsed)))
                                         .thenReturn(s)
-                                        .doOnSuccess(saved -> {
-                                            if (valid) continuePipeline(saved);
-                                        });
+                                        .doOnSuccess(this::continuePipeline);
                             });
                 });
+    }
+
+    private static String summarizeErrors(JsonNode errors) {
+        if (errors == null || errors.isMissingNode() || errors.isNull()) return "unknown";
+        if (errors.isArray()) {
+            StringBuilder sb = new StringBuilder();
+            errors.forEach(n -> {
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(n.asText());
+            });
+            String s = sb.toString();
+            return s.length() > 400 ? s.substring(0, 400) : s;
+        }
+        String s = errors.asText("unknown");
+        return s.length() > 400 ? s.substring(0, 400) : s;
     }
 
     private static String buildGoal(String instrument, String style, MarketNewsService.NewsBrief brief) {
         String styleGuide = switch (style) {
             case "trend-following" ->
-                    "Primary style: TREND-FOLLOWING. Use EMA/SMA structure, pullback entries with trend, "
-                            + "avoid counter-trend fades. Exits on trend break / trailing ROI.";
+                    "Primary style: TREND-FOLLOWING. Famous bases: EMA/SMA pullback, dual-MA crossover. "
+                            + "Invent NEW windows/filters each time. Exits on trend break / trailing ROI.";
             case "breakout-momentum" ->
-                    "Primary style: BREAKOUT/MOMENTUM. Enter on range/volatility expansion with volume "
-                            + "confirmation; tight invalidation if breakout fails.";
+                    "Primary style: BREAKOUT/MOMENTUM. Famous bases: Donchian/Turtle breakout, MACD hist flip. "
+                            + "Invent NEW lookbacks/volume filters. Tight invalidation if breakout fails.";
             default ->
-                    "Primary style: MEAN-REVERSION. Prefer RSI + Bollinger (or similar) fades back to "
-                            + "mid/mean; fade extremes, do not chase trends.";
+                    "Primary style: MEAN-REVERSION. Famous bases: RSI+Bollinger fade, RSI-2 style extremes. "
+                            + "Invent NEW RSI/BB periods each time; fade extremes, do not chase trends.";
         };
         return "INR-margined CoinDCX futures strategy for " + instrument + ".\n"
                 + styleGuide + "\n"
+                + "Create a DISTINCT new strategy (unique params), not a copy of a prior run. "
                 + "Long and short with strict risk. Target profit_factor > 1.2, win_rate > 55%, "
                 + "positive total profit, max drawdown under 35%. Avoid overtrading. Timeframe 5m.\n\n"
                 + brief.promptBlock();
@@ -169,6 +212,19 @@ public class StrategyPipelineService {
             if (known.equals(s) || s.contains(known.split("-")[0])) return known;
         }
         return STRATEGY_STYLES.get(0);
+    }
+
+    /** Cool all styles for an instrument (custom duration). */
+    void blockInstrumentRegen(String instrument) {
+        blockInstrumentRegen(instrument,
+                Duration.ofHours(Math.max(1, props.pipeline().regenCooldownHours())));
+    }
+
+    void blockInstrumentRegen(String instrument, Duration cool) {
+        if (instrument == null || instrument.isBlank() || cool == null) return;
+        for (String style : STRATEGY_STYLES) {
+            regenCooldown.block(instrument, style, cool);
+        }
     }
 
     static String styleShort(String style) {
@@ -230,11 +286,16 @@ public class StrategyPipelineService {
                         }))
                 .flatMap(pass -> {
                     if (!pass) {
-                        return setStatus(strategy.id(), "REJECTED")
-                                .then(audit.record(strategy.tenantId(), strategy.userId(),
-                                        "STRATEGY_BACKTEST_GATE_FAILED", "STRATEGY", strategy.id(), Map.of(
+                        String styleKey = normalizeStyle(readStyle(strategy));
+                        // Soft cool this style only — keep generating other styles/coins.
+                        regenCooldown.block(instrument, styleKey, Duration.ofHours(2));
+                        UUID sid = strategy.id();
+                        return audit.record(strategy.tenantId(), strategy.userId(),
+                                        "STRATEGY_BACKTEST_GATE_FAILED", "STRATEGY", sid, Map.of(
                                                 "instrument", instrument,
-                                                "reason", "backtest quality gate")));
+                                                "style", styleKey,
+                                                "reason", "backtest quality gate — purged"))
+                                .then(purge.purgeStrategy(sid));
                     }
                     // Paper fills use live CoinDCX prices — do not start paper without real data.
                     return setStatus(strategy.id(), "BACKTESTED")
@@ -362,6 +423,19 @@ public class StrategyPipelineService {
         } catch (Exception e) {
             return "1h";
         }
+    }
+
+    private String readStyle(Strategy strategy) {
+        try {
+            if (strategy.config() != null) {
+                String fromCfg = mapper.readTree(strategy.config().asString())
+                        .path("strategy_style").asText(null);
+                if (fromCfg != null && !fromCfg.isBlank()) return fromCfg;
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return AutoStrategyScheduler.inferStyle(strategy);
     }
 
     private JsonNode enrich(JsonNode config, String timeframe, List<String> pairs,

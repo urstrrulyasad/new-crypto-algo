@@ -4,13 +4,52 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Safe zone ~66dp centered; keep artwork inside ~24..84 -->
+
+    <!-- Rounded tile behind mark -->
     <path
-        android:fillColor="#0F766E"
-        android:pathData="M0,0h108v108h-108z" />
+        android:fillColor="#0D9488"
+        android:pathData="M30,30h48a8,8 0,0 1,8 8v48a8,8 0,0 1,-8 8h-48a8,8 0,0 1,-8 -8v-48a8,8 0,0 1,8 -8z" />
+
+    <!-- Candle chart motif -->
+    <!-- Wick left -->
     <path
-        android:fillColor="#F8FAFC"
-        android:pathData="M28,70 L44,38 L54,54 L66,30 L80,70 Z" />
+        android:fillColor="#CCFBF1"
+        android:pathData="M40,40h3v28h-3z" />
+    <!-- Body green up -->
+    <path
+        android:fillColor="#5EEAD4"
+        android:pathData="M37,50h9v14h-9z" />
+
+    <!-- Wick mid -->
+    <path
+        android:fillColor="#CCFBF1"
+        android:pathData="M53,36h3v34h-3z" />
+    <!-- Body red-ish down (amber for brand cohesion) -->
+    <path
+        android:fillColor="#FDE68A"
+        android:pathData="M50,42h9v18h-9z" />
+
+    <!-- Wick right -->
+    <path
+        android:fillColor="#CCFBF1"
+        android:pathData="M66,44h3v26h-3z" />
+    <!-- Body teal up -->
     <path
         android:fillColor="#99F6E4"
-        android:pathData="M30,74h48v6h-48z" />
+        android:pathData="M63,52h9v16h-9z" />
+
+    <!-- Trend line -->
+    <path
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M36,68 L46,58 L55,62 L72,40" />
+
+    <!-- Accent dot (live) -->
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M74,36m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0" />
 </vector>

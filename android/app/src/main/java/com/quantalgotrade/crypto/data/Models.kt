@@ -75,8 +75,29 @@ data class Strategy(
     val marketType: String? = null,
     val marginCurrency: String? = null,
     val createdAt: String? = null,
+    val sourceCode: String? = null,
     val config: JsonObject? = null,
     val paper: PaperProgress? = null,
+)
+
+@Serializable
+data class StrategyTrade(
+    val id: String,
+    val mode: String? = null,
+    val pair: String,
+    val side: String,
+    val quantity: Double = 0.0,
+    val entryPrice: Double = 0.0,
+    val exitPrice: Double? = null,
+    val status: String,
+    val realizedPnl: Double? = null,
+    val openedAt: String? = null,
+    val closedAt: String? = null,
+)
+
+@Serializable
+data class InstrumentsResponse(
+    val instruments: List<String> = emptyList(),
 )
 
 @Serializable
