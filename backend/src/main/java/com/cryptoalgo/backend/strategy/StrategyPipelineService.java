@@ -137,12 +137,15 @@ public class StrategyPipelineService {
                                         log.warn("Generate discarded (failed smoke) for {} / {} — {}",
                                                 instrument, styleKey, errSummary);
                                     }
+                                    String skipAction = isRateLimitError(errSummary)
+                                            ? "AI_RATE_LIMITED" : "STRATEGY_GENERATE_SKIPPED";
                                     return audit.record(tenantId, userId,
-                                                    "STRATEGY_GENERATE_SKIPPED", "STRATEGY", null,
+                                                    skipAction, "STRATEGY", null,
                                                     Map.of("instrument", instrument,
                                                             "style", styleKey,
                                                             "paused", String.valueOf(paused || llmExhausted),
-                                                            "reason", errSummary))
+                                                            "reason", errSummary,
+                                                            "rateLimited", String.valueOf(isRateLimitError(errSummary))))
                                             .then(Mono.empty());
                                 }
                                 UUID providerId = providerUsed == null ? null
@@ -183,6 +186,19 @@ public class StrategyPipelineService {
         }
         String s = errors.asText("unknown");
         return s.length() > 400 ? s.substring(0, 400) : s;
+    }
+
+    public static boolean isRateLimitError(String reason) {
+        if (reason == null || reason.isBlank()) return false;
+        String r = reason.toLowerCase();
+        return r.contains("429")
+                || r.contains("rate limit")
+                || r.contains("rate_limit")
+                || r.contains("ratelimit")
+                || r.contains("resource_exhausted")
+                || r.contains("quota")
+                || r.contains("too many requests")
+                || r.contains("capacity");
     }
 
     private static String buildGoal(String instrument, String style, MarketNewsService.NewsBrief brief) {

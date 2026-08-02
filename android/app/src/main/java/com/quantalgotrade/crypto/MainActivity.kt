@@ -1,8 +1,12 @@
 package com.quantalgotrade.crypto
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.quantalgotrade.crypto.data.RefreshRequest
 import com.quantalgotrade.crypto.ui.BiometricGateScreen
@@ -27,9 +32,14 @@ import com.quantalgotrade.crypto.ui.theme.QuantAlgoTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
+    private val notifyPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* granted or not — polling still runs */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNotifyPermissionIfNeeded()
         val container = (application as QuantAlgoTradeApp).container
 
         setContent {
@@ -123,6 +133,17 @@ class MainActivity : FragmentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun requestNotifyPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notifyPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }

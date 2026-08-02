@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api, currentUser } from '@/lib/api'
-import { Badge, Button, Card, Empty, Input, Label, PageShell, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Callout, Card, Empty, Input, Label, PageShell, PageTitle, Spinner } from '@/components/ui'
+
+interface AiHealth {
+  rateLimited: boolean
+  message: string
+  lastAt?: string | null
+  recentRateLimitEvents: number
+}
 
 interface Provider {
   id: string
@@ -37,6 +44,7 @@ export default function Admin() {
   return (
     <PageShell>
       <PageTitle title="Admin" subtitle="AI provider configuration, users and tenants" />
+      <AiRateLimitBanner />
       <div className="grid gap-6 xl:grid-cols-2">
         <Providers />
         <Users />
@@ -46,20 +54,48 @@ export default function Admin() {
   )
 }
 
+function AiRateLimitBanner() {
+  const [health, setHealth] = useState<AiHealth | null>(null)
+  useEffect(() => {
+    const load = () =>
+      api.get<AiHealth>('/api/v1/ai/health').then(setHealth).catch(() => setHealth(null))
+    load()
+    const t = setInterval(load, 15_000)
+    return () => clearInterval(t)
+  }, [])
+  if (!health?.rateLimited) return null
+  return (
+    <Callout tone="warn">
+      <div className="font-semibold text-amber-100">AI provider rate limited — rotate the key below</div>
+      <p className="mt-1 text-amber-100/90">{health.message}</p>
+      <p className="mt-1 text-xs text-amber-200/70">
+        {health.recentRateLimitEvents} event(s) in the last 2h
+        {health.lastAt ? ` · last ${new Date(health.lastAt).toLocaleString()}` : ''}
+      </p>
+    </Callout>
+  )
+}
+
 function Providers() {
   const [providers, setProviders] = useState<Provider[] | null>(null)
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [type, setType] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [error, setError] = useState('')
+  const [health, setHealth] = useState<AiHealth | null>(null)
 
-  const load = () => api.get<Provider[]>('/api/v1/ai/providers').then(setProviders).catch(() => setProviders([]))
+  const load = () => {
+    api.get<Provider[]>('/api/v1/ai/providers').then(setProviders).catch(() => setProviders([]))
+    api.get<AiHealth>('/api/v1/ai/health').then(setHealth).catch(() => setHealth(null))
+  }
   useEffect(() => {
     load()
     api.get<CatalogEntry[]>('/api/v1/ai/providers/catalog').then((c) => {
       setCatalog(c)
       setType((prev) => prev || c[0]?.type || '')
     }).catch(() => setCatalog([]))
+    const t = setInterval(load, 20_000)
+    return () => clearInterval(t)
   }, [])
 
   async function add() {
@@ -81,8 +117,15 @@ function Providers() {
       <p className="mb-4 text-xs text-slate-500">
         Pick a provider and paste its API key — models, endpoints and rate-limit failover are built in.
         On a rate limit the platform switches models, then falls through to the next provider.
+        When all keys are exhausted you will see a rate-limit warning here — paste a fresh key to rotate.
         OpenAI needs its own key (sk-…) under “OpenAI”; an OpenAI key will not work when saved as OpenRouter.
       </p>
+      {health?.rateLimited && (
+        <div className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <div className="font-semibold">Rotate key now</div>
+          <div className="mt-1 text-xs text-amber-200/80">{health.message}</div>
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <Label>Provider</Label>

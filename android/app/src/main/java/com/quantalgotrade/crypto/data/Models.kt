@@ -122,3 +122,64 @@ data class PriceLine(
 
 @Serializable
 data class ApiError(val message: String? = null, val status: Int? = null)
+
+@Serializable
+data class ExchangeKey(
+    val id: String,
+    val exchange: String,
+    val label: String,
+    val keyLast4: String,
+    val status: String,
+    val createdAt: String? = null,
+)
+
+@Serializable
+data class CreateKeyRequest(
+    val label: String,
+    val apiKey: String,
+    val apiSecret: String,
+)
+
+@Serializable
+data class AiProvider(
+    val id: String,
+    val providerType: String,
+    val displayName: String,
+    val models: List<String> = emptyList(),
+    val priority: Int = 100,
+    val enabled: Boolean = true,
+    val createdAt: String? = null,
+)
+
+@Serializable
+data class AiCatalogEntry(
+    val type: String,
+    val displayName: String,
+    val models: List<String> = emptyList(),
+)
+
+@Serializable
+data class UpsertProviderRequest(
+    val providerType: String,
+    val apiKey: String? = null,
+    val priority: Int? = null,
+    val enabled: Boolean? = null,
+)
+
+@Serializable
+data class AiHealth(
+    val rateLimited: Boolean = false,
+    val message: String = "",
+    val lastAt: String? = null,
+    val recentRateLimitEvents: Long = 0,
+)
+
+@Serializable
+data class AlertItem(
+    val id: String,
+    val action: String,
+    val title: String,
+    val body: String,
+    val details: Map<String, String> = emptyMap(),
+    val createdAt: String? = null,
+)

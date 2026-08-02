@@ -436,8 +436,12 @@ public class ExecutionService {
                             Instant.now(), null);
                     return template.insert(order).then(template.insert(pos))
                             .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_ORDER_PLACED",
-                                    "ORDER", order.id(), Map.of("market", market, "side", "buy",
+                                    "ORDER", order.id(), Map.of(
+                                            "pair", signal.pair(),
+                                            "market", market,
+                                            "side", posSide,
                                             "qty", qty.toPlainString(),
+                                            "entryPrice", price.toPlainString(),
                                             "sl", slPrice.toPlainString(),
                                             "target", targetPrice.toPlainString())))
                             .then(placeSlLeg(bot, key, market, pos, qty, slPrice));

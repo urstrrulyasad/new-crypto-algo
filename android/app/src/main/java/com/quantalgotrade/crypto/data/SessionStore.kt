@@ -19,6 +19,8 @@ class SessionStore(private val context: Context, private val json: Json) {
     private val userKey = stringPreferencesKey("user_json")
     private val emailKey = stringPreferencesKey("saved_email")
     private val biometricKey = booleanPreferencesKey("biometric_enabled")
+    private val lastAlertKey = stringPreferencesKey("last_seen_alert_id")
+    private val alertsBootstrappedKey = booleanPreferencesKey("alerts_bootstrapped")
 
     val accessToken: Flow<String?> = context.dataStore.data.map { it[accessKey] }
     val user: Flow<UserInfo?> = context.dataStore.data.map { prefs ->
@@ -31,6 +33,8 @@ class SessionStore(private val context: Context, private val json: Json) {
     suspend fun savedEmail(): String? = context.dataStore.data.first()[emailKey]
     suspend fun isBiometricEnabled(): Boolean = context.dataStore.data.first()[biometricKey] == true
     suspend fun hasSession(): Boolean = !currentRefreshToken().isNullOrBlank()
+    suspend fun lastSeenAlertId(): String? = context.dataStore.data.first()[lastAlertKey]
+    suspend fun alertsBootstrapped(): Boolean = context.dataStore.data.first()[alertsBootstrappedKey] == true
 
     suspend fun saveSession(access: String, refresh: String, user: UserInfo) {
         context.dataStore.edit {
@@ -45,11 +49,24 @@ class SessionStore(private val context: Context, private val json: Json) {
         context.dataStore.edit { it[biometricKey] = enabled }
     }
 
+    suspend fun markAlertsBootstrapped(latestId: String?) {
+        context.dataStore.edit {
+            it[alertsBootstrappedKey] = true
+            if (!latestId.isNullOrBlank()) it[lastAlertKey] = latestId
+        }
+    }
+
+    suspend fun setLastSeenAlertId(id: String) {
+        context.dataStore.edit { it[lastAlertKey] = id }
+    }
+
     suspend fun clearSession() {
         context.dataStore.edit {
             it.remove(accessKey)
             it.remove(refreshKey)
             it.remove(userKey)
+            it.remove(lastAlertKey)
+            it.remove(alertsBootstrappedKey)
             // keep email + biometric preference for next unlock
         }
     }
