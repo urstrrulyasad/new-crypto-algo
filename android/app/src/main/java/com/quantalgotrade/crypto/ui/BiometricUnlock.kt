@@ -97,7 +97,7 @@ fun BiometricGateScreen(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    listOf(Color(0xFF042F2E), Color(0xFF0F766E), Color(0xFF115E59)),
+                    listOf(Color(0xFF05070D), Color(0xFF0A1628), Color(0xFF0E3A3A)),
                 ),
             )
             .padding(28.dp),

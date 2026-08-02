@@ -45,6 +45,7 @@ data class Summary(
 @Serializable
 data class Position(
     val id: String,
+    val botId: String? = null,
     val pair: String,
     val side: String,
     val quantity: Double,
@@ -53,6 +54,7 @@ data class Position(
     val status: String,
     val realizedPnl: Double? = null,
     val openedAt: String? = null,
+    val closedAt: String? = null,
 )
 
 @Serializable

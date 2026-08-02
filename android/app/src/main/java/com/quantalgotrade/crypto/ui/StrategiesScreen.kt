@@ -14,22 +14,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.quantalgotrade.crypto.data.AppContainer
@@ -38,96 +36,112 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 @Composable
-fun StrategiesScreen(container: AppContainer) {
+fun StrategiesScreen(
+    container: AppContainer,
+    onOpenStrategy: (String) -> Unit,
+) {
     var strategies by remember { mutableStateOf<List<Strategy>>(emptyList()) }
-    var selected by remember { mutableStateOf<Strategy?>(null) }
-    var loading by remember { mutableStateOf(true) }
+    var initialLoading by remember { mutableStateOf(true) }
+    var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var tick by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
+    val scheme = MaterialTheme.colorScheme
 
-    LaunchedEffect(tick) {
-        loading = true
+    suspend fun reload() {
         error = null
         try {
             strategies = container.api.strategies("FUTURES")
                 .filter { it.status !in setOf("REJECTED", "ARCHIVED") }
-            if (selected != null) {
-                selected = strategies.find { it.id == selected!!.id }
-            }
         } catch (e: Exception) {
             error = e.message ?: "Failed to load strategies"
         } finally {
-            loading = false
+            initialLoading = false
+            refreshing = false
         }
     }
 
+    LaunchedEffect(Unit) { reload() }
+
     Column(Modifier.fillMaxSize()) {
-        HeroHeader("Strategies", "Auto pipeline · paper → LIVE at 60% WR/profit")
-        TextButton(onClick = { scope.launch { tick++ } }, modifier = Modifier.padding(horizontal = 12.dp)) {
-            Text("Refresh")
-        }
-        if (loading) {
-            Column(Modifier.padding(24.dp)) { CircularProgressIndicator() }
-            return
-        }
-        if (error != null) {
-            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
-        }
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize(),
+        HeroHeader("Strategies", "Tap a strategy for trades, chart & paper detail")
+        PullRefreshColumn(
+            refreshing = refreshing,
+            onRefresh = { scope.launch { refreshing = true; reload() } },
+            initialLoading = initialLoading,
+            error = error,
         ) {
-            items(strategies, key = { it.id }) { s ->
-                Card(
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { selected = if (selected?.id == s.id) null else s },
-                ) {
-                    Column(Modifier.padding(14.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(s.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                            AssistChip(onClick = {}, label = { Text(s.status.replace('_', ' ')) })
-                        }
-                        Text(
-                            "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(0.65f),
-                        )
-                        val paper = s.paper
-                        if (paper != null && (s.status == "PAPER_TRADING" || s.status == "LIVE_APPROVED")) {
-                            Spacer(Modifier.height(8.dp))
-                            val need = paper.requiredTrades.coerceAtLeast(1)
-                            val prog = (paper.closedTrades.toFloat() / need).coerceIn(0f, 1f)
-                            LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth())
-                            Spacer(Modifier.height(4.dp))
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(strategies, key = { "strat-${it.id}" }) { s ->
+                    Card(
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenStrategy(s.id) },
+                        colors = CardDefaults.cardColors(containerColor = scheme.surface),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(s.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                AssistChip(
+                                    onClick = { onOpenStrategy(s.id) },
+                                    label = { Text(s.status.replace('_', ' ')) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = scheme.primary.copy(alpha = 0.14f),
+                                        labelColor = scheme.primary,
+                                    ),
+                                )
+                            }
                             Text(
-                                String.format(
-                                    Locale.US,
-                                    "Paper %d/%d · WR %.0f%% · PnL %.2f",
-                                    paper.closedTrades,
-                                    paper.requiredTrades,
-                                    paper.winRate * 100,
-                                    paper.totalPnl,
-                                ),
+                                "${s.instrument ?: "—"} · ${s.marginCurrency ?: "INR"}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFF0F766E),
+                                color = scheme.onSurfaceVariant,
                             )
-                        }
-                        if (selected?.id == s.id) {
-                            Spacer(Modifier.height(8.dp))
+                            val paper = s.paper
+                            if (paper != null && (s.status == "PAPER_TRADING" || s.status == "LIVE_APPROVED")) {
+                                Spacer(Modifier.height(8.dp))
+                                val need = paper.requiredTrades.coerceAtLeast(1)
+                                val prog = (paper.closedTrades.toFloat() / need).coerceIn(0f, 1f)
+                                LinearProgressIndicator(
+                                    progress = { prog },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = scheme.primary,
+                                    trackColor = scheme.surfaceVariant,
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    String.format(
+                                        Locale.US,
+                                        "Paper %d/%d · WR %.0f%% · PnL %.2f",
+                                        paper.closedTrades,
+                                        paper.requiredTrades,
+                                        paper.winRate * 100,
+                                        paper.totalPnl,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = scheme.secondary,
+                                )
+                            }
+                            Spacer(Modifier.height(6.dp))
                             Text(
-                                "Origin ${s.origin ?: "—"} · LIVE needs ≥60% WR or ≥60% paper profit.",
-                                style = MaterialTheme.typography.bodySmall,
+                                "Open detail →",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = scheme.primary,
                             )
                         }
                     }
                 }
-            }
-            if (strategies.isEmpty()) {
-                item { Text("No active strategies yet — auto-gen is running.") }
+                if (strategies.isEmpty()) {
+                    item(key = "empty") {
+                        Text(
+                            "No active strategies yet — auto-gen is running.",
+                            color = scheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }

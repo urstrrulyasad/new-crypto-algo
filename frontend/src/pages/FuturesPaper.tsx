@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
 import { Badge, Button, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
@@ -24,12 +25,14 @@ interface Position {
   side: string
   quantity: number
   entryPrice: number
+  exitPrice?: number | null
   status: string
   realizedPnl?: number
   marginCurrency?: string
 }
 
 export default function FuturesPaper() {
+  const navigate = useNavigate()
   const [bots, setBots] = useState<Bot[] | null>(null)
   const [positions, setPositions] = useState<Position[]>([])
   const [stopping, setStopping] = useState(false)
@@ -72,14 +75,15 @@ export default function FuturesPaper() {
     }
   }
 
-  const openByBot = positions.filter((p) => p.status === 'OPEN')
+  const open = positions.filter((p) => p.status === 'OPEN')
+  const closed = positions.filter((p) => p.status !== 'OPEN')
 
   return (
     <PageShell>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <PageTitle
           title="Futures Paper Trade"
-          subtitle="Auto-spawned INR paper bots — stop/kill only, no manual create"
+          subtitle="Open & closed paper positions with entry / exit — stop/kill bots only"
         />
         <Button variant="danger" onClick={stopAll} disabled={stopping}>
           {stopping ? 'Stopping…' : 'Stop all futures'}
@@ -118,8 +122,7 @@ export default function FuturesPaper() {
                 Stake ₹{b.stakeAmount} · {b.leverage ?? 1}x · max {b.maxOpenTrades} open
               </div>
               <div className="mt-2 text-xs text-slate-500">
-                Open positions:{' '}
-                {openByBot.filter((p) => p.botId === b.id).length}
+                Open positions: {open.filter((p) => p.botId === b.id).length}
               </div>
               <div className="mt-4 flex gap-2">
                 {b.status === 'RUNNING' ? (
@@ -138,51 +141,86 @@ export default function FuturesPaper() {
         </div>
       )}
 
-      <Card className="mt-6" delay={0.1}>
-        <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
-          Recent paper positions
-        </h2>
-        {positions.length === 0 ? (
-          <Empty message="No positions yet." />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
-                  <th className="pb-2 pr-4">Instrument</th>
-                  <th className="pb-2 pr-4">Side</th>
-                  <th className="pb-2 pr-4">Qty</th>
-                  <th className="pb-2 pr-4">Entry</th>
-                  <th className="pb-2 pr-4">Status</th>
-                  <th className="pb-2">PnL</th>
-                </tr>
-              </thead>
-              <tbody>
-                {positions.slice(0, 30).map((p) => (
-                  <tr key={p.id} className="data-row border-b border-edge/40 text-slate-300">
-                    <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
-                    <td className="py-2.5 pr-4">
-                      <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
-                    </td>
-                    <td className="py-2.5 pr-4">{p.quantity}</td>
-                    <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
-                    <td className="py-2.5 pr-4">
-                      <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
-                    </td>
-                    <td
-                      className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
-                    >
-                      {p.realizedPnl != null
-                        ? `₹${Number(p.realizedPnl).toFixed(2)}`
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <PositionTable
+        title={`Open paper positions (${open.length})`}
+        rows={open}
+        empty="No open paper positions."
+        onRow={(p) =>
+          navigate(`/futures/chart/${encodeURIComponent(p.pair)}?mode=paper&positionId=${p.id}&timeframe=5m`)
+        }
+      />
+      <PositionTable
+        title={`Closed paper positions (${closed.length})`}
+        rows={closed.slice(0, 50)}
+        empty="No closed paper positions yet."
+        onRow={(p) =>
+          navigate(`/futures/chart/${encodeURIComponent(p.pair)}?mode=paper&positionId=${p.id}&timeframe=5m`)
+        }
+      />
     </PageShell>
+  )
+}
+
+function PositionTable({
+  title,
+  rows,
+  empty,
+  onRow,
+}: {
+  title: string
+  rows: Position[]
+  empty: string
+  onRow: (p: Position) => void
+}) {
+  return (
+    <Card className="mt-6" delay={0.1} hover={false}>
+      <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
+        {title}
+      </h2>
+      {rows.length === 0 ? (
+        <Empty message={empty} />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
+                <th className="pb-2 pr-4">Instrument</th>
+                <th className="pb-2 pr-4">Side</th>
+                <th className="pb-2 pr-4">Qty</th>
+                <th className="pb-2 pr-4">Entry</th>
+                <th className="pb-2 pr-4">Exit</th>
+                <th className="pb-2 pr-4">Status</th>
+                <th className="pb-2">PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((p) => (
+                <tr
+                  key={p.id}
+                  className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
+                  onClick={() => onRow(p)}
+                >
+                  <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
+                  <td className="py-2.5 pr-4">
+                    <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
+                  </td>
+                  <td className="py-2.5 pr-4">{p.quantity}</td>
+                  <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
+                  <td className="py-2.5 pr-4">
+                    {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
+                  </td>
+                  <td className="py-2.5 pr-4">
+                    <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
+                  </td>
+                  <td className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {p.realizedPnl != null ? `₹${Number(p.realizedPnl).toFixed(2)}` : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   )
 }

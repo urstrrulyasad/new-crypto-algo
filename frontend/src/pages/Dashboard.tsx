@@ -144,6 +144,7 @@ export default function Dashboard() {
                     <th className="pb-2 pr-4">Side</th>
                     <th className="pb-2 pr-4">Qty</th>
                     <th className="pb-2 pr-4">Entry</th>
+                    <th className="pb-2 pr-4">Exit</th>
                     <th className="pb-2 pr-4">Status</th>
                     <th className="pb-2">PnL</th>
                   </tr>
@@ -168,6 +169,9 @@ export default function Dashboard() {
                       </td>
                       <td className="py-2.5 pr-4">{p.quantity}</td>
                       <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
+                      <td className="py-2.5 pr-4">
+                        {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
+                      </td>
                       <td className="py-2.5 pr-4">
                         <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
                       </td>

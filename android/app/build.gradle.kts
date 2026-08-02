@@ -13,9 +13,10 @@ android {
         applicationId = "com.quantalgotrade.crypto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 4
+        versionName = "1.2.1"
         buildConfigField("String", "DEFAULT_API_BASE", "\"https://hbpt7cur19.execute-api.ap-south-1.amazonaws.com\"")
+        buildConfigField("String", "WEB_PORTAL_BASE", "\"https://new-crypto-algo-eight.vercel.app\"")
     }
 
     buildTypes {

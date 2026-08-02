@@ -9,9 +9,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -35,20 +38,29 @@ fun SettingsScreen(container: AppContainer, onLoggedOut: () -> Unit) {
     val activity = LocalContext.current as FragmentActivity
     val biometricAvailable = canUseBiometric(activity)
 
+    val scheme = MaterialTheme.colorScheme
     Column(Modifier.fillMaxSize()) {
         HeroHeader("Settings", "Account · security · about")
         Column(Modifier.padding(16.dp)) {
-            Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = scheme.surface),
+            ) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("Signed in as", style = MaterialTheme.typography.labelMedium)
+                    Text("Signed in as", style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
                     Text(user?.email ?: "—", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     user?.role?.let {
-                        Text("Role: $it", style = MaterialTheme.typography.bodySmall)
+                        Text("Role: $it", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                     }
                 }
             }
             Spacer(Modifier.height(14.dp))
-            Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = scheme.surface),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -61,6 +73,7 @@ fun SettingsScreen(container: AppContainer, onLoggedOut: () -> Unit) {
                             if (biometricAvailable) "Unlock app without typing password"
                             else "Biometrics unavailable on this device",
                             style = MaterialTheme.typography.bodySmall,
+                            color = scheme.onSurfaceVariant,
                         )
                     }
                     Switch(
@@ -69,6 +82,10 @@ fun SettingsScreen(container: AppContainer, onLoggedOut: () -> Unit) {
                         onCheckedChange = { enabled ->
                             scope.launch { container.sessionStore.setBiometricEnabled(enabled) }
                         },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = scheme.onPrimary,
+                            checkedTrackColor = scheme.primary,
+                        ),
                     )
                 }
             }
@@ -82,12 +99,16 @@ fun SettingsScreen(container: AppContainer, onLoggedOut: () -> Unit) {
                 },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = scheme.error.copy(alpha = 0.18f),
+                    contentColor = scheme.error,
+                ),
             ) {
                 Text("Sign out")
             }
             Spacer(Modifier.height(20.dp))
-            Text("Quant Algo Trade - Crypto", style = MaterialTheme.typography.bodySmall)
-            Text("v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall)
+            Text("Quant Algo Trade - Crypto", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+            Text("v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
         }
     }
 }

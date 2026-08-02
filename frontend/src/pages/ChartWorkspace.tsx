@@ -10,7 +10,7 @@ import {
 } from '@/components/CandleChart'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h'] as const
-type Mode = 'clean' | 'strategy' | 'live'
+type Mode = 'clean' | 'strategy' | 'live' | 'paper'
 
 interface StrategyTrade {
   id: string
@@ -19,6 +19,7 @@ interface StrategyTrade {
   pair: string
   side: string
   entryPrice: number
+  exitPrice?: number | null
   status: string
   openedAt: string
   closedAt?: string | null
@@ -30,6 +31,7 @@ interface PortfolioPosition {
   pair: string
   side: string
   entryPrice: number
+  exitPrice?: number | null
   slPrice?: number | null
   targetPrice?: number | null
   status: string
@@ -205,38 +207,47 @@ export default function ChartWorkspace() {
       return
     }
 
-    if (mode === 'live') {
+    if (mode === 'live' || mode === 'paper') {
+      const portfolioMode = mode === 'paper' ? 'PAPER' : 'LIVE'
       try {
         const positions = await api.get<PortfolioPosition[]>(
-          '/api/v1/portfolio/positions?mode=LIVE',
+          `/api/v1/portfolio/positions?mode=${portfolioMode}`,
         )
-        const open = (positions ?? []).filter((p) => p.status === 'OPEN' && p.pair === pair)
         let pos: PortfolioPosition | undefined
         if (positionId && isUuid(positionId)) {
-          pos = open.find((p) => p.id === positionId) ?? (positions ?? []).find((p) => p.id === positionId)
+          pos = (positions ?? []).find((p) => p.id === positionId)
         }
         if (!pos) {
+          const open = (positions ?? []).filter((p) => p.status === 'OPEN' && p.pair === pair)
           pos = [...open].sort(
             (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime(),
           )[0]
         }
         setMarkers([])
-        if (!pos || pos.status !== 'OPEN') {
+        if (!pos) {
           setPriceLines([])
           setModeBadge('')
-          setBanner('No open LIVE position')
+          setBanner(`No ${portfolioMode} position`)
           return
         }
         setBanner('')
-        setModeBadge('LIVE')
+        setModeBadge(portfolioMode)
         const lines: PriceLineSpec[] = [
           {
             price: Number(pos.entryPrice),
-            label: 'Entry LIVE',
+            label: `Entry ${portfolioMode}`,
             color: '#22d3ee',
             style: 'solid',
           },
         ]
+        if (pos.exitPrice != null && Number(pos.exitPrice) > 0) {
+          lines.push({
+            price: Number(pos.exitPrice),
+            label: `Exit ${portfolioMode}`,
+            color: '#a78bfa',
+            style: 'dashed',
+          })
+        }
         if (pos.slPrice != null && Number(pos.slPrice) > 0) {
           lines.push({ price: Number(pos.slPrice), label: 'SL', color: '#fb7185', style: 'dashed' })
         }
@@ -250,7 +261,7 @@ export default function ChartWorkspace() {
         }
         setPriceLines(lines)
       } catch {
-        setBanner('LIVE overlay unavailable')
+        setBanner(`${portfolioMode} overlay unavailable`)
         setPriceLines([])
       }
     }

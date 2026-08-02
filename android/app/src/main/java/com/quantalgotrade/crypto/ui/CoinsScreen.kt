@@ -1,5 +1,6 @@
 package com.quantalgotrade.crypto.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,14 +11,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -30,16 +29,19 @@ import com.quantalgotrade.crypto.data.Strategy
 import kotlinx.coroutines.launch
 
 @Composable
-fun CoinsScreen(container: AppContainer) {
+fun CoinsScreen(
+    container: AppContainer,
+    onOpenChart: (pair: String) -> Unit,
+) {
     var coins by remember { mutableStateOf<List<String>>(emptyList()) }
     var byCoin by remember { mutableStateOf<Map<String, List<Strategy>>>(emptyMap()) }
-    var loading by remember { mutableStateOf(true) }
+    var initialLoading by remember { mutableStateOf(true) }
+    var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var tick by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
+    val scheme = MaterialTheme.colorScheme
 
-    LaunchedEffect(tick) {
-        loading = true
+    suspend fun reload() {
         error = null
         try {
             val instruments = runCatching {
@@ -51,37 +53,44 @@ fun CoinsScreen(container: AppContainer) {
         } catch (e: Exception) {
             error = e.message ?: "Failed to load coins"
         } finally {
-            loading = false
+            initialLoading = false
+            refreshing = false
         }
     }
 
+    LaunchedEffect(Unit) { reload() }
+
     Column(Modifier.fillMaxSize()) {
-        HeroHeader("Futures coins", "INR-margined instruments & strategy coverage")
-        TextButton(onClick = { scope.launch { tick++ } }, modifier = Modifier.padding(horizontal = 12.dp)) {
-            Text("Refresh")
-        }
-        if (loading) {
-            Column(Modifier.padding(24.dp)) { CircularProgressIndicator() }
-            return
-        }
-        if (error != null) {
-            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
-        }
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        HeroHeader("Futures coins", "Tap a coin to open its live chart")
+        PullRefreshColumn(
+            refreshing = refreshing,
+            onRefresh = { scope.launch { refreshing = true; reload() } },
+            initialLoading = initialLoading,
+            error = error,
         ) {
-            items(coins, key = { it }) { coin ->
-                val strats = byCoin[coin].orEmpty()
-                Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(14.dp)) {
-                        Text(coin, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (strats.isEmpty()) "No active strategy yet"
-                            else "${strats.size} strategies · ${strats.joinToString { it.status.replace('_', ' ') }}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(0.65f),
-                        )
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(coins, key = { "coin-$it" }) { coin ->
+                    val strats = byCoin[coin].orEmpty()
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenChart(coin) },
+                        colors = CardDefaults.cardColors(containerColor = scheme.surface),
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Text(coin, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (strats.isEmpty()) "No active strategy yet · tap for chart"
+                                else "${strats.size} strategies · tap for chart",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
