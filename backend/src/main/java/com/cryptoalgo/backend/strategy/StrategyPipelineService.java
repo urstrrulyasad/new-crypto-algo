@@ -6,6 +6,7 @@ import com.cryptoalgo.backend.config.AppProperties;
 import com.cryptoalgo.backend.domain.Backtest;
 import com.cryptoalgo.backend.domain.Bot;
 import com.cryptoalgo.backend.domain.Strategy;
+import com.cryptoalgo.backend.market.MarketNewsService;
 import com.cryptoalgo.backend.repo.BacktestRepository;
 import com.cryptoalgo.backend.repo.BotRepository;
 import com.cryptoalgo.backend.repo.StrategyRepository;
@@ -35,9 +36,17 @@ public class StrategyPipelineService {
 
     private static final Logger log = LoggerFactory.getLogger(StrategyPipelineService.class);
 
+    /** Complementary styles so one coin can host several active strategies. */
+    public static final List<String> STRATEGY_STYLES = List.of(
+            "mean-reversion",
+            "trend-following",
+            "breakout-momentum"
+    );
+
     private final AiChainService aiChain;
     private final StrategyEngineClient engine;
     private final CoinDcxFuturesClient futures;
+    private final MarketNewsService news;
     private final StrategyRepository strategies;
     private final BacktestRepository backtests;
     private final BotRepository bots;
@@ -47,13 +56,15 @@ public class StrategyPipelineService {
     private final AppProperties props;
 
     public StrategyPipelineService(AiChainService aiChain, StrategyEngineClient engine,
-                                   CoinDcxFuturesClient futures, StrategyRepository strategies,
+                                   CoinDcxFuturesClient futures, MarketNewsService news,
+                                   StrategyRepository strategies,
                                    BacktestRepository backtests, BotRepository bots,
                                    R2dbcEntityTemplate template,
                                    ObjectMapper mapper, AuditService audit, AppProperties props) {
         this.aiChain = aiChain;
         this.engine = engine;
         this.futures = futures;
+        this.news = news;
         this.strategies = strategies;
         this.backtests = backtests;
         this.bots = bots;
@@ -63,55 +74,117 @@ public class StrategyPipelineService {
         this.props = props;
     }
 
-    /** Auto-generate a FUTURES strategy for one INR instrument. */
+    /** Minimum CoinDCX candle rows (excluding CSV header) required before generate/paper. */
+    private static final int MIN_LIVE_CANDLES = 50;
+
     public Mono<Strategy> generateFutures(UUID tenantId, UUID userId, String instrument) {
+        return generateFutures(tenantId, userId, instrument, STRATEGY_STYLES.get(0));
+    }
+
+    /** Auto-generate a FUTURES strategy for one INR instrument + style (+ news bias). */
+    public Mono<Strategy> generateFutures(UUID tenantId, UUID userId, String instrument, String style) {
+        String styleKey = normalizeStyle(style);
         // 5m: enough signal density for paper fills, better AI backtest quality than 1m noise.
         String timeframe = "5m";
-        String goal = "INR-margined CoinDCX futures strategy for " + instrument
-                + ". Long and short with strict risk. Prefer high win-rate mean-reversion or "
-                + "trend-following with clear filters. Target profit_factor > 1.2, win_rate > 55%, "
-                + "positive total profit, max drawdown under 35%. Avoid overtrading. Timeframe 5m.";
-        String name = "FUT " + instrument;
+        String shortLabel = styleShort(styleKey);
+        String name = "FUT " + instrument + " · " + shortLabel;
         List<String> pairs = List.of(instrument);
 
-        return aiChain.chain(tenantId).flatMap(chain ->
-                futures.recentCsv(instrument, CoinDcxFuturesClient.toFuturesResolution(timeframe), 100)
-                        .onErrorReturn("")
-                        .flatMap(csv -> {
-                            Map<String, Object> engineReq = new java.util.HashMap<>();
-                            engineReq.put("providers", chain.chain());
-                            engineReq.put("goal", goal);
-                            engineReq.put("timeframe", timeframe);
-                            engineReq.put("pairs", pairs);
-                            engineReq.put("risk_profile", "balanced");
-                            engineReq.put("market_type", "FUTURES");
-                            if (!csv.isBlank()) engineReq.put("market_data", csv);
-                            return engine.generateStrategy(engineReq);
-                        })
-                        .flatMap(result -> {
-                            boolean valid = result.path("valid").asBoolean(false);
-                            String providerUsed = result.path("provider_used").asText(null);
-                            UUID providerId = providerUsed == null ? null
-                                    : chain.providerIds().get(providerUsed);
-                            JsonNode config = enrich(result.path("config"), timeframe, pairs,
-                                    result.path("model_used").asText(null), providerUsed,
-                                    valid ? null : result.path("errors"));
-                            Strategy s = new Strategy(UUID.randomUUID(), tenantId, userId,
-                                    name, 1, null, result.path("source_code").asText(""),
-                                    Json.of(config.toString()), valid ? "GENERATED" : "REJECTED",
-                                    "AI_GENERATED", providerId, goal,
-                                    "FUTURES", instrument, "INR", Instant.now());
-                            return template.insert(s)
-                                    .then(audit.record(tenantId, userId,
-                                            valid ? "STRATEGY_GENERATED" : "STRATEGY_REJECTED",
-                                            "STRATEGY", s.id(),
-                                            Map.of("instrument", instrument,
-                                                    "provider", providerUsed == null ? "?" : providerUsed)))
-                                    .thenReturn(s)
-                                    .doOnSuccess(saved -> {
-                                        if (valid) continuePipeline(saved);
-                                    });
-                        }));
+        return requireLiveMarketData(instrument, timeframe)
+                .then(Mono.zip(aiChain.chain(tenantId), news.briefForInstrument(instrument)))
+                .flatMap(tuple -> {
+                    var chain = tuple.getT1();
+                    var brief = tuple.getT2();
+                    String goal = buildGoal(instrument, styleKey, brief);
+                    return futures.recentCsv(instrument, CoinDcxFuturesClient.toFuturesResolution(timeframe), 100)
+                            .flatMap(csv -> {
+                                if (!hasEnoughCandles(csv)) {
+                                    return Mono.error(new IllegalStateException(
+                                            "CoinDCX returned insufficient candles for " + instrument
+                                                    + "; refusing to generate without real market data"));
+                                }
+                                Map<String, Object> engineReq = new java.util.HashMap<>();
+                                engineReq.put("providers", chain.chain());
+                                engineReq.put("goal", goal);
+                                engineReq.put("timeframe", timeframe);
+                                engineReq.put("pairs", pairs);
+                                engineReq.put("risk_profile", riskForStyle(styleKey));
+                                engineReq.put("market_type", "FUTURES");
+                                engineReq.put("market_data", csv);
+                                return engine.generateStrategy(engineReq);
+                            })
+                            .flatMap(result -> {
+                                boolean valid = result.path("valid").asBoolean(false);
+                                String providerUsed = result.path("provider_used").asText(null);
+                                UUID providerId = providerUsed == null ? null
+                                        : chain.providerIds().get(providerUsed);
+                                JsonNode config = enrich(result.path("config"), timeframe, pairs,
+                                        result.path("model_used").asText(null), providerUsed,
+                                        valid ? null : result.path("errors"), styleKey,
+                                        brief.sentiment());
+                                Strategy s = new Strategy(UUID.randomUUID(), tenantId, userId,
+                                        name, 1, null, result.path("source_code").asText(""),
+                                        Json.of(config.toString()), valid ? "GENERATED" : "REJECTED",
+                                        "AI_GENERATED", providerId, goal,
+                                        "FUTURES", instrument, "INR", Instant.now());
+                                return template.insert(s)
+                                        .then(audit.record(tenantId, userId,
+                                                valid ? "STRATEGY_GENERATED" : "STRATEGY_REJECTED",
+                                                "STRATEGY", s.id(),
+                                                Map.of("instrument", instrument,
+                                                        "style", styleKey,
+                                                        "sentiment", brief.sentiment(),
+                                                        "provider", providerUsed == null ? "?" : providerUsed)))
+                                        .thenReturn(s)
+                                        .doOnSuccess(saved -> {
+                                            if (valid) continuePipeline(saved);
+                                        });
+                            });
+                });
+    }
+
+    private static String buildGoal(String instrument, String style, MarketNewsService.NewsBrief brief) {
+        String styleGuide = switch (style) {
+            case "trend-following" ->
+                    "Primary style: TREND-FOLLOWING. Use EMA/SMA structure, pullback entries with trend, "
+                            + "avoid counter-trend fades. Exits on trend break / trailing ROI.";
+            case "breakout-momentum" ->
+                    "Primary style: BREAKOUT/MOMENTUM. Enter on range/volatility expansion with volume "
+                            + "confirmation; tight invalidation if breakout fails.";
+            default ->
+                    "Primary style: MEAN-REVERSION. Prefer RSI + Bollinger (or similar) fades back to "
+                            + "mid/mean; fade extremes, do not chase trends.";
+        };
+        return "INR-margined CoinDCX futures strategy for " + instrument + ".\n"
+                + styleGuide + "\n"
+                + "Long and short with strict risk. Target profit_factor > 1.2, win_rate > 55%, "
+                + "positive total profit, max drawdown under 35%. Avoid overtrading. Timeframe 5m.\n\n"
+                + brief.promptBlock();
+    }
+
+    static String normalizeStyle(String style) {
+        if (style == null || style.isBlank()) return STRATEGY_STYLES.get(0);
+        String s = style.trim().toLowerCase(java.util.Locale.ROOT);
+        for (String known : STRATEGY_STYLES) {
+            if (known.equals(s) || s.contains(known.split("-")[0])) return known;
+        }
+        return STRATEGY_STYLES.get(0);
+    }
+
+    static String styleShort(String style) {
+        return switch (normalizeStyle(style)) {
+            case "trend-following" -> "Trend";
+            case "breakout-momentum" -> "Breakout";
+            default -> "MR";
+        };
+    }
+
+    private static String riskForStyle(String style) {
+        return switch (normalizeStyle(style)) {
+            case "breakout-momentum" -> "aggressive";
+            case "trend-following" -> "balanced";
+            default -> "conservative";
+        };
     }
 
     /** Public so the scheduler can resume GENERATED strategies after a restart mid-backtest. */
@@ -163,17 +236,62 @@ public class StrategyPipelineService {
                                                 "instrument", instrument,
                                                 "reason", "backtest quality gate")));
                     }
+                    // Paper fills use live CoinDCX prices — do not start paper without real data.
                     return setStatus(strategy.id(), "BACKTESTED")
-                            .then(startPaperBot(strategy, pairs))
-                            .then(setStatus(strategy.id(), "PAPER_TRADING"))
-                            .then(audit.record(strategy.tenantId(), strategy.userId(),
-                                    "PAPER_TRADING_STARTED", "STRATEGY", strategy.id(),
-                                    Map.of("instrument", instrument)));
+                            .then(requireLiveMarketData(instrument, timeframe)
+                                    .then(startPaperBot(strategy, pairs))
+                                    .then(setStatus(strategy.id(), "PAPER_TRADING"))
+                                    .then(audit.record(strategy.tenantId(), strategy.userId(),
+                                            "PAPER_TRADING_STARTED", "STRATEGY", strategy.id(),
+                                            Map.of("instrument", instrument)))
+                                    .onErrorResume(e -> {
+                                        log.warn("Paper start blocked for {} — CoinDCX data unavailable: {}",
+                                                instrument, e.getMessage());
+                                        return audit.record(strategy.tenantId(), strategy.userId(),
+                                                        "PAPER_START_BLOCKED_NO_MARKET_DATA", "STRATEGY",
+                                                        strategy.id(),
+                                                        Map.of("instrument", instrument,
+                                                                "reason", String.valueOf(e.getMessage())))
+                                                .then();
+                                    }));
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(
                         v -> log.info("Pipeline for {} finished", strategy.id()),
                         e -> log.error("Pipeline for {} failed", strategy.id(), e));
+    }
+
+    /**
+     * Ensures CoinDCX public futures API returns enough live candles for the pair.
+     * Generation and paper start must not proceed on empty/error responses.
+     */
+    public Mono<Void> requireLiveMarketData(String instrument, String timeframe) {
+        String resolution = CoinDcxFuturesClient.toFuturesResolution(timeframe);
+        return futures.recentCsv(instrument, resolution, MIN_LIVE_CANDLES + 10)
+                .flatMap(csv -> {
+                    if (!hasEnoughCandles(csv)) {
+                        return Mono.error(new IllegalStateException(
+                                "CoinDCX live candles unavailable/insufficient for " + instrument));
+                    }
+                    return futures.lastPrice(instrument)
+                            .flatMap(px -> {
+                                if (px == null || px.signum() <= 0) {
+                                    return Mono.error(new IllegalStateException(
+                                            "CoinDCX last price missing for " + instrument));
+                                }
+                                return Mono.empty();
+                            });
+                })
+                .onErrorMap(e -> e instanceof IllegalStateException ? e
+                        : new IllegalStateException("CoinDCX API not usable for " + instrument
+                        + ": " + e.getMessage(), e))
+                .then();
+    }
+
+    static boolean hasEnoughCandles(String csv) {
+        if (csv == null || csv.isBlank()) return false;
+        long rows = csv.lines().skip(1).filter(l -> !l.isBlank()).count();
+        return rows >= MIN_LIVE_CANDLES;
     }
 
     private boolean passesBacktestGate(JsonNode metrics) {
@@ -247,7 +365,8 @@ public class StrategyPipelineService {
     }
 
     private JsonNode enrich(JsonNode config, String timeframe, List<String> pairs,
-                            String model, String provider, JsonNode errors) {
+                            String model, String provider, JsonNode errors,
+                            String style, String sentiment) {
         var node = config != null && config.isObject()
                 ? (com.fasterxml.jackson.databind.node.ObjectNode) config.deepCopy()
                 : mapper.createObjectNode();
@@ -256,6 +375,8 @@ public class StrategyPipelineService {
         node.set("pairs", mapper.valueToTree(pairs));
         node.put("market_type", "FUTURES");
         node.put("margin_currency", "INR");
+        if (style != null) node.put("strategy_style", style);
+        if (sentiment != null) node.put("news_sentiment", sentiment);
         if (provider != null) node.put("provider_used", provider);
         if (model != null) node.put("model_used", model);
         if (errors != null && !errors.isMissingNode()) node.set("generation_errors", errors);

@@ -28,6 +28,7 @@ interface Strategy {
     pairs?: string[]
     provider_used?: string
     model_used?: string
+    generation_errors?: string[] | string
   }
   createdAt: string
   paper: PaperProgress
@@ -229,9 +230,13 @@ export default function FuturesStrategies() {
   )
 }
 
-function PipelineStepper({ status }: { status: string }) {
+function PipelineStepper({ status, reason }: { status: string; reason?: string }) {
   if (status === 'REJECTED') {
-    return <p className="text-sm text-rose-400">Rejected — failed validation or backtest gate.</p>
+    return (
+      <p className="text-sm text-rose-400">
+        Rejected — {reason || 'failed validation or backtest quality gate (drawdown / trade count).'}
+      </p>
+    )
   }
   if (status === 'ARCHIVED') {
     return <p className="text-sm text-slate-400">Archived — instrument delisted or superseded.</p>
@@ -420,7 +425,16 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
       </div>
 
       <div className="mb-4">
-        <PipelineStepper status={strategy.status} />
+        <PipelineStepper
+          status={strategy.status}
+          reason={
+            strategy.config?.generation_errors
+              ? Array.isArray(strategy.config.generation_errors)
+                ? strategy.config.generation_errors.join('; ')
+                : String(strategy.config.generation_errors)
+              : undefined
+          }
+        />
       </div>
 
       {(strategy.status === 'PAPER_TRADING' || strategy.status === 'LIVE_APPROVED') && (

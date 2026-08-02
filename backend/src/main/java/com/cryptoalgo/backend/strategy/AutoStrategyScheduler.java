@@ -84,12 +84,30 @@ public class AutoStrategyScheduler {
                     return ownerUser(tenantId).flatMap(userId ->
                             futures.activeInstruments("INR")
                                     .flatMap(all -> {
+                                        if (all == null || all.isEmpty()) {
+                                            log.warn("CoinDCX returned no INR instruments — skipping auto-gen");
+                                            return Mono.empty();
+                                        }
                                         int cap = props.pipeline().maxInstruments();
                                         List<String> top = rankInstruments(all, cap);
                                         Set<String> active = new HashSet<>(all);
-                                        return delistGone(tenantId, active)
+                                        String probe = top.isEmpty() ? all.get(0) : top.get(0);
+                                        // Refuse the whole cycle if public CoinDCX market data is down.
+                                        return pipeline.requireLiveMarketData(probe, "5m")
+                                                .then(delistGone(tenantId, active))
                                                 .then(resumeStuckGenerated(tenantId))
-                                                .then(generateMissing(tenantId, userId, top));
+                                                .then(resumeBacktestedAwaitingPaper(tenantId))
+                                                .then(generateMissing(tenantId, userId, top))
+                                                .onErrorResume(e -> {
+                                                    log.warn("Skipping auto-gen — CoinDCX not ready: {}",
+                                                            e.getMessage());
+                                                    return Mono.empty();
+                                                });
+                                    })
+                                    .onErrorResume(e -> {
+                                        log.warn("CoinDCX instruments API failed — skipping auto-gen: {}",
+                                                e.getMessage());
+                                        return Mono.empty();
                                     }));
                 });
     }
@@ -173,37 +191,96 @@ public class AutoStrategyScheduler {
                 .then();
     }
 
+    /**
+     * BACKTESTED strategies that never got a paper bot (CoinDCX was down at gate time).
+     * Re-kick continuePipeline once live market data is available again.
+     */
+    private Mono<Void> resumeBacktestedAwaitingPaper(UUID tenantId) {
+        return strategies.findByTenantIdAndMarketType(tenantId, "FUTURES")
+                .filter(s -> "BACKTESTED".equals(s.status()))
+                .concatMap(s -> bots.findByStrategyId(s.id())
+                        .filter(b -> "PAPER".equals(b.mode()) && "RUNNING".equals(b.status()))
+                        .hasElements()
+                        .flatMap(hasPaper -> {
+                            if (hasPaper) return Mono.empty();
+                            log.info("Resuming BACKTESTED {} — no paper bot yet (CoinDCX gate)",
+                                    s.instrument());
+                            pipeline.continuePipeline(s);
+                            return Mono.just(true);
+                        }))
+                .then();
+    }
+
     private Mono<Void> generateMissing(UUID tenantId, UUID userId, List<String> top) {
+        int maxPer = Math.max(1, props.pipeline().maxStrategiesPerInstrument());
+        List<String> styles = StrategyPipelineService.STRATEGY_STYLES;
         return strategies.findByTenantIdAndMarketType(tenantId, "FUTURES")
                 .collectList()
                 .flatMap(existing -> {
-                    Set<String> activeCovered = new HashSet<>();
-                    Set<String> everTried = new HashSet<>();
+                    // instrument -> count of active strategies; instrument -> styles already used
+                    java.util.Map<String, Integer> activeCount = new java.util.HashMap<>();
+                    java.util.Map<String, Set<String>> usedStyles = new java.util.HashMap<>();
                     for (Strategy s : existing) {
                         if (s.instrument() == null) continue;
-                        everTried.add(s.instrument());
                         if ("REJECTED".equals(s.status()) || "ARCHIVED".equals(s.status())) continue;
-                        activeCovered.add(s.instrument());
+                        activeCount.merge(s.instrument(), 1, Integer::sum);
+                        usedStyles.computeIfAbsent(s.instrument(), k -> new HashSet<>())
+                                .add(inferStyle(s));
                     }
-                    // Prefer never-tried instruments so REJECTED retries cannot starve the queue.
-                    List<String> neverTried = top.stream()
-                            .filter(inst -> !everTried.contains(inst))
-                            .toList();
-                    List<String> retryRejected = top.stream()
-                            .filter(inst -> !activeCovered.contains(inst) && everTried.contains(inst))
-                            .toList();
-                    List<String> queue = !neverTried.isEmpty() ? neverTried : retryRejected;
+                    record Job(String instrument, String style) {}
+                    List<Job> queue = new java.util.ArrayList<>();
+                    for (String inst : top) {
+                        int n = activeCount.getOrDefault(inst, 0);
+                        if (n >= maxPer) continue;
+                        Set<String> have = usedStyles.getOrDefault(inst, Set.of());
+                        for (String style : styles) {
+                            if (have.contains(style)) continue;
+                            queue.add(new Job(inst, style));
+                            break; // one new style per instrument per pass through top list
+                        }
+                    }
+                    // Prefer coins with fewer strategies, then list order.
+                    queue.sort((a, b) -> Integer.compare(
+                            activeCount.getOrDefault(a.instrument(), 0),
+                            activeCount.getOrDefault(b.instrument(), 0)));
                     return Flux.fromIterable(queue)
                             .take(1)
-                            .concatMap(inst -> {
-                                log.info("Auto-generating FUTURES strategy for {}", inst);
-                                return pipeline.generateFutures(tenantId, userId, inst)
+                            .concatMap(job -> {
+                                log.info("Auto-generating FUTURES {} strategy for {} ({}/{} active)",
+                                        job.style(), job.instrument(),
+                                        activeCount.getOrDefault(job.instrument(), 0), maxPer);
+                                return pipeline.generateFutures(tenantId, userId, job.instrument(), job.style())
                                         .onErrorResume(e -> {
-                                            log.warn("Generate failed for {}: {}", inst, e.getMessage());
+                                            log.warn("Generate failed for {} / {}: {}",
+                                                    job.instrument(), job.style(), e.getMessage());
                                             return Mono.empty();
                                         });
                             })
                             .then();
                 });
+    }
+
+    /** Best-effort style tag from name/config/prompt for deduping multi-strategy slots. */
+    private static String inferStyle(Strategy s) {
+        String blob = ((s.name() == null ? "" : s.name()) + " "
+                + (s.prompt() == null ? "" : s.prompt())).toLowerCase(java.util.Locale.ROOT);
+        try {
+            if (s.config() != null) {
+                blob += " " + s.config().asString().toLowerCase(java.util.Locale.ROOT);
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+        if (blob.contains("breakout") || blob.contains("momentum")) {
+            return "breakout-momentum";
+        }
+        if (blob.contains("trend")) {
+            return "trend-following";
+        }
+        if (blob.contains("mean-reversion") || blob.contains(" · mr") || blob.contains("mean reversion")) {
+            return "mean-reversion";
+        }
+        // Legacy single strategy per coin → treat as mean-reversion slot.
+        return "mean-reversion";
     }
 }

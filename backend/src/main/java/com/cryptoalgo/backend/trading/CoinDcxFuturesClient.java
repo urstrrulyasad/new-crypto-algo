@@ -6,6 +6,8 @@ import com.cryptoalgo.backend.market.CandleService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -29,6 +31,8 @@ import java.util.List;
  */
 @Component
 public class CoinDcxFuturesClient {
+
+    private static final Logger log = LoggerFactory.getLogger(CoinDcxFuturesClient.class);
 
     public record Instrument(String pair, BigDecimal minQuantity, BigDecimal minNotional,
                              BigDecimal maxLeverage, BigDecimal maxNotional) {}
@@ -254,19 +258,28 @@ public class CoinDcxFuturesClient {
     }
 
     /**
-     * Live CoinDCX futures mark/last via latest 1m candle close.
-     * Empty if no candle — callers must fail closed (no invented price).
+     * Live CoinDCX futures mark/last via latest candle close.
+     * Tries 1m (15m window) then 5m — empty only if both fail.
+     * Callers must fail closed (no invented price).
      */
     public Mono<BigDecimal> lastPrice(String pair) {
         Instant to = Instant.now();
-        Instant from = to.minusSeconds(180);
-        return candles(pair, "1", from, to)
+        return candleClose(pair, "1", to.minus(Duration.ofMinutes(15)), to)
+                .switchIfEmpty(candleClose(pair, "5", to.minus(Duration.ofHours(2)), to));
+    }
+
+    private Mono<BigDecimal> candleClose(String pair, String resolution, Instant from, Instant to) {
+        return candles(pair, resolution, from, to)
                 .collectList()
                 .flatMap(list -> {
                     if (list.isEmpty()) return Mono.empty();
                     BigDecimal close = list.get(list.size() - 1).close();
                     if (close == null || close.signum() <= 0) return Mono.empty();
                     return Mono.just(close);
+                })
+                .onErrorResume(e -> {
+                    log.warn("Futures candle close failed for {} res={}: {}", pair, resolution, e.getMessage());
+                    return Mono.empty();
                 });
     }
 

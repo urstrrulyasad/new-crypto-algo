@@ -139,7 +139,11 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
         check = validate_strategy_code(FALLBACK_SOURCE)
         if check["valid"]:
             try:
-                await _smoke_test(FALLBACK_SOURCE, timeframe, req.pairs[0], req.market_type)
+                # Fallback only needs to load + run; thin alts rarely hit 3 signals
+                # on a 250-bar smoke window — don't reject the whole coin for that.
+                await _smoke_test(
+                    FALLBACK_SOURCE, timeframe, req.pairs[0], req.market_type,
+                    min_signals=0)
             except Exception as e:  # noqa: BLE001
                 check = {"valid": False, "errors": [f"Fallback smoke test failed: {e}"]}
         result = {
@@ -147,7 +151,7 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
             "config": {**FALLBACK_CONFIG, "timeframe": timeframe},
             "explanation": "Curated RSI+Bollinger fallback after LLM failure/rate-limit",
             "provider_used": "TEMPLATE",
-            "model_used": "rsi-bb-fallback",
+            "model_used": "rsi-bb-ema-fallback",
             "attempts": all_attempts,
         }
 
@@ -163,13 +167,19 @@ async def generate(req: GenerateRequest, x_internal_token: str | None = Header(N
     }
 
 
-async def _smoke_test(source: str, timeframe: str, pair: str, market_type: str = "FUTURES") -> None:
+async def _smoke_test(source: str, timeframe: str, pair: str, market_type: str = "FUTURES",
+                      min_signals: int = 3) -> None:
     """Run the strategy end-to-end on ~250 real candles to catch runtime bugs."""
     strategy_cls = load_strategy_class(source)
     tf = normalize_timeframe(timeframe, market_type)
     tf_ms = (_FUT_MS if market_type.upper() == "FUTURES" else _TF_MS).get(tf, 3_600_000)
     now_ms = int(time.time() * 1000)
     df = await fetch_candles(pair, tf, now_ms - tf_ms * 250, now_ms, market_type)
+    if df is None or len(df) < 50:
+        raise ValueError(
+            f"CoinDCX returned insufficient live candles for {pair} "
+            f"(got {0 if df is None else len(df)}); refusing smoke without real market data"
+        )
     strategy = strategy_cls()
     df = strategy.populate_indicators(df)
     df = strategy.populate_entry_trend(df)
@@ -178,7 +188,7 @@ async def _smoke_test(source: str, timeframe: str, pair: str, market_type: str =
         raise ValueError("strategy never sets enter_long or enter_short")
     long_n = int(df["enter_long"].fillna(0).sum()) if "enter_long" in df.columns else 0
     short_n = int(df["enter_short"].fillna(0).sum()) if "enter_short" in df.columns else 0
-    if long_n + short_n < 3:
+    if long_n + short_n < min_signals:
         raise ValueError(
             f"strategy produced too few entry signals on smoke candles "
             f"(long={long_n}, short={short_n}); need clearer RSI/BB/EMA rules"

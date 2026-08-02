@@ -1,0 +1,42 @@
+# GCP VM deploy: backend + strategy-engine against Supabase (no local Postgres/frontend).
+# Usage on the VM:
+#   cp .env.gcp.example .env.gcp   # fill secrets
+#   docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --build
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.runtime
+    restart: unless-stopped
+    environment:
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xmx384m -Xms128m}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_SCHEMA: ${DB_SCHEMA:-quantdcx}
+      DB_SSL_MODE: ${DB_SSL_MODE:-require}
+      JWT_SECRET: ${JWT_SECRET}
+      MASTER_KEY: ${MASTER_KEY}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@platform.local}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD}
+      STRATEGY_ENGINE_URL: http://strategy-engine:8000
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      PIPELINE_MAX_STRATEGIES_PER_INSTRUMENT: ${PIPELINE_MAX_STRATEGIES_PER_INSTRUMENT:-3}
+    ports:
+      - "8080:8080"
+
+  strategy-engine:
+    build: ./strategy-engine
+    restart: unless-stopped
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      BACKEND_URL: http://backend:8080
+      SIGNAL_POLL_SECONDS: ${SIGNAL_POLL_SECONDS:-60}
+    depends_on:
+      - backend
+    # Keep engine private on the VM; only backend is public
+    ports:
+      - "127.0.0.1:8000:8000"

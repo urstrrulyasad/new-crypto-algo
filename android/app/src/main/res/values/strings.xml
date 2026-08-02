@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Quant Algo Trade - Crypto</string>
+    <string name="login_title">Quant Algo Trade</string>
+    <string name="login_subtitle">Crypto futures trading cockpit</string>
+    <string name="email">Email</string>
+    <string name="password">Password</string>
+    <string name="sign_in">Sign in</string>
+    <string name="dashboard">Dashboard</string>
+    <string name="strategies">Strategies</string>
+    <string name="settings">Settings</string>
+    <string name="wallet">CoinDCX wallet</string>
+    <string name="live_summary">LIVE summary</string>
+    <string name="positions">LIVE positions</string>
+    <string name="api_base_url">API base URL</string>
+    <string name="save">Save</string>
+    <string name="logout">Log out</string>
+    <string name="refresh">Refresh</string>
+</resources>

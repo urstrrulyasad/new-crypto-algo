@@ -1,0 +1,8 @@
+# Runtime-only image; build the jar on a machine with enough RAM first:
+#   ./mvnw -q package -DskipTests
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/backend-*.jar app.jar
+EXPOSE 8080
+ENV JAVA_TOOL_OPTIONS="-Xmx384m -Xms128m"
+ENTRYPOINT ["java", "-jar", "app.jar"]

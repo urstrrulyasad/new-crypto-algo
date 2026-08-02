@@ -38,6 +38,8 @@ public record AppProperties(
             double minBacktestProfitFactor,
             int maxLiveBots,
             double maxWalletPct,
-            long autoGenMs
+            long autoGenMs,
+            /** Active (non-REJECTED/ARCHIVED) strategies allowed per instrument. */
+            int maxStrategiesPerInstrument
     ) {}
 }
