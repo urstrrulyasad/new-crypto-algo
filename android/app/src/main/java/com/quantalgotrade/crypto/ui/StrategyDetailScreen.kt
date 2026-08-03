@@ -56,6 +56,8 @@ fun StrategyDetailScreen(
     var initialLoading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var approveBusy by remember { mutableStateOf(false) }
+    var approveMsg by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val scheme = MaterialTheme.colorScheme
 
@@ -144,6 +146,56 @@ fun StrategyDetailScreen(
                                         color = scheme.secondary,
                                     )
                                 }
+                                if (s.status == "PAPER_TRADING") {
+                                    Spacer(Modifier.height(12.dp))
+                                    val gateOk = paperGateLikelyMet(s.paper)
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                approveBusy = true
+                                                approveMsg = null
+                                                try {
+                                                    val resp = container.api.approveLive(s.id)
+                                                    approveMsg = if (resp.ok) {
+                                                        "Approved for LIVE"
+                                                    } else {
+                                                        resp.reason ?: "Approve failed"
+                                                    }
+                                                    reload()
+                                                } catch (e: Exception) {
+                                                    approveMsg = e.message ?: "Approve failed"
+                                                } finally {
+                                                    approveBusy = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !approveBusy && gateOk,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(14.dp),
+                                    ) {
+                                        Text(
+                                            when {
+                                                approveBusy -> "Approving…"
+                                                !gateOk -> "Paper gate not met yet"
+                                                else -> "Approve for LIVE"
+                                            },
+                                        )
+                                    }
+                                    if (!gateOk) {
+                                        Text(
+                                            "Same as web: needs enough paper trades and WR/profit gate.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = scheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    approveMsg?.let {
+                                        Text(
+                                            it,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (it.contains("Approved")) scheme.secondary else scheme.error,
+                                        )
+                                    }
+                                }
                                 if (!pair.isNullOrBlank()) {
                                     Spacer(Modifier.height(12.dp))
                                     Button(
@@ -190,6 +242,13 @@ fun StrategyDetailScreen(
     }
 }
 
+private fun paperGateLikelyMet(paper: com.quantalgotrade.crypto.data.PaperProgress?): Boolean {
+    if (paper == null) return false
+    val need = paper.requiredTrades.coerceAtLeast(1)
+    if (paper.closedTrades < need) return false
+    return paper.winRate >= paper.requiredWinRate || paper.totalPnl > 0
+}
+
 @Composable
 private fun TradeCard(
     t: StrategyTrade,
@@ -219,6 +278,10 @@ private fun TradeCard(
                 color = muted,
             )
             Text("Qty ${t.quantity}", color = muted)
+            Text("Opened ${formatDateTime(t.openedAt)}", color = muted)
+            if (!t.closedAt.isNullOrBlank()) {
+                Text("Closed ${formatDateTime(t.closedAt)}", color = muted)
+            }
             t.realizedPnl?.let {
                 Text(
                     String.format(Locale.US, "PnL ₹%,.2f", it),

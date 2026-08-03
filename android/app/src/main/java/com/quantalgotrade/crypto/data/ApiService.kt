@@ -24,6 +24,9 @@ interface ApiService {
     @GET("/api/v1/portfolio/positions")
     suspend fun positions(@Query("mode") mode: String = "LIVE"): List<Position>
 
+    @GET("/api/v1/portfolio/orders")
+    suspend fun orders(@Query("mode") mode: String = "LIVE"): List<TradeOrder>
+
     @GET("/api/v1/strategies")
     suspend fun strategies(@Query("marketType") marketType: String = "FUTURES"): List<Strategy>
 
@@ -35,6 +38,9 @@ interface ApiService {
         @Path("id") id: String,
         @Query("mode") mode: String? = "PAPER",
     ): List<StrategyTrade>
+
+    @POST("/api/v1/strategies/{id}/approve-live")
+    suspend fun approveLive(@Path("id") id: String): ApproveLiveResponse
 
     @GET("/api/v1/market/futures/instruments")
     suspend fun futuresInstruments(): InstrumentsResponse

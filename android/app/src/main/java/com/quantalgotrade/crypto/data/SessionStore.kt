@@ -60,6 +60,13 @@ class SessionStore(private val context: Context, private val json: Json) {
         context.dataStore.edit { it[lastAlertKey] = id }
     }
 
+    /** Drop access token but keep refresh so biometric can restore the session. */
+    suspend fun clearAccessOnly() {
+        context.dataStore.edit {
+            it.remove(accessKey)
+        }
+    }
+
     suspend fun clearSession() {
         context.dataStore.edit {
             it.remove(accessKey)

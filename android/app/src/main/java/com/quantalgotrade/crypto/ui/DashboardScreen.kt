@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,9 +32,12 @@ import androidx.compose.ui.unit.dp
 import com.quantalgotrade.crypto.data.AppContainer
 import com.quantalgotrade.crypto.data.Position
 import com.quantalgotrade.crypto.data.Summary
+import com.quantalgotrade.crypto.data.TradeOrder
 import com.quantalgotrade.crypto.data.Wallet
 import kotlinx.coroutines.launch
 import java.util.Locale
+
+private enum class OrderFilter { All, Pending, Success, Failed }
 
 @Composable
 fun DashboardScreen(
@@ -44,6 +49,8 @@ fun DashboardScreen(
     var live by remember { mutableStateOf<Summary?>(null) }
     var paper by remember { mutableStateOf<Summary?>(null) }
     var positions by remember { mutableStateOf<List<Position>>(emptyList()) }
+    var orders by remember { mutableStateOf<List<TradeOrder>>(emptyList()) }
+    var orderFilter by remember { mutableStateOf(OrderFilter.All) }
     var initialLoading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -56,6 +63,7 @@ fun DashboardScreen(
             live = container.api.summary("LIVE")
             paper = runCatching { container.api.summary("PAPER") }.getOrNull()
             positions = container.api.positions("LIVE")
+            orders = runCatching { container.api.orders("LIVE") }.getOrDefault(emptyList())
             try {
                 wallet = container.api.wallet()
                 walletErr = null
@@ -73,8 +81,18 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { reload() }
 
+    val pending = orders.filter { isPendingOrder(it) }
+    val success = orders.filter { isSuccessOrder(it) }
+    val failed = orders.filter { isFailedOrder(it) }
+    val filtered = when (orderFilter) {
+        OrderFilter.All -> orders
+        OrderFilter.Pending -> pending
+        OrderFilter.Success -> success
+        OrderFilter.Failed -> failed
+    }
+
     Column(Modifier.fillMaxSize()) {
-        HeroHeader("Dashboard", "LIVE wallet · positions with entry / exit")
+        HeroHeader("Dashboard", "LIVE wallet · positions · orders")
         PullRefreshColumn(
             refreshing = refreshing,
             onRefresh = { scope.launch { refreshing = true; reload() } },
@@ -168,6 +186,16 @@ fun DashboardScreen(
                                     color = scheme.onSurfaceVariant,
                                 )
                                 Text("Qty ${p.quantity}", color = scheme.onSurfaceVariant)
+                                Text(
+                                    "Opened ${formatDateTime(p.openedAt)}",
+                                    color = scheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    "Closed ${formatDateTime(p.closedAt)}",
+                                    color = scheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
                                 p.realizedPnl?.let {
                                     Text(
                                         String.format(Locale.US, "PnL ₹%,.2f", it),
@@ -178,7 +206,99 @@ fun DashboardScreen(
                         }
                     }
                 }
+
+                item(key = "ord-h") {
+                    Spacer(Modifier.height(4.dp))
+                    Text("LIVE orders", fontWeight = FontWeight.SemiBold)
+                }
+                item(key = "ord-chips") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OrderChip("All", orders.size, orderFilter == OrderFilter.All, scheme) {
+                            orderFilter = OrderFilter.All
+                        }
+                        OrderChip("Pending", pending.size, orderFilter == OrderFilter.Pending, scheme) {
+                            orderFilter = OrderFilter.Pending
+                        }
+                        OrderChip("Success", success.size, orderFilter == OrderFilter.Success, scheme) {
+                            orderFilter = OrderFilter.Success
+                        }
+                        OrderChip("Failed", failed.size, orderFilter == OrderFilter.Failed, scheme) {
+                            orderFilter = OrderFilter.Failed
+                        }
+                    }
+                }
+                if (filtered.isEmpty()) {
+                    item(key = "ord-empty") {
+                        Text("No ${orderFilter.name.lowercase()} LIVE orders", color = scheme.onSurfaceVariant)
+                    }
+                } else {
+                    items(filtered.take(40), key = { "ord-${it.id}" }) { o ->
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenChart(o.pair, o.id) },
+                            colors = CardDefaults.cardColors(containerColor = scheme.surface),
+                        ) {
+                            Column(Modifier.padding(14.dp)) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("${o.pair} · ${o.side}", fontWeight = FontWeight.Medium)
+                                    Text(
+                                        o.status,
+                                        color = when {
+                                            isFailedOrder(o) -> scheme.error
+                                            isSuccessOrder(o) -> scheme.secondary
+                                            else -> scheme.primary
+                                        },
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
+                                Text("Qty ${o.quantity}", color = scheme.onSurfaceVariant)
+                                val detail = o.error?.takeIf { it.isNotBlank() }
+                                    ?: o.price?.let { String.format(Locale.US, "₹%,.6f", it) }
+                                    ?: "—"
+                                Text(detail, color = scheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    "Order ${formatDateTime(o.createdAt)}",
+                                    color = scheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+@Composable
+private fun OrderChip(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    scheme: androidx.compose.material3.ColorScheme,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text("$label · $count") },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = scheme.primary.copy(alpha = 0.22f),
+            selectedLabelColor = scheme.primary,
+        ),
+    )
+}
+
+private fun isFailedOrder(o: TradeOrder): Boolean {
+    val s = o.status.uppercase(Locale.US)
+    return s == "FAILED" || s == "REJECTED" || s == "CANCELLED"
+}
+
+private fun isSuccessOrder(o: TradeOrder): Boolean =
+    o.status.uppercase(Locale.US) == "FILLED"
+
+private fun isPendingOrder(o: TradeOrder): Boolean =
+    !isFailedOrder(o) && !isSuccessOrder(o)

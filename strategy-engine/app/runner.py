@@ -244,10 +244,10 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
 async def _post_signal(item: dict, pair: str, timeframe: str, action: str,
                        price: float, candle_ts: str, *, catchup: bool,
                        key_tag: str = "") -> dict:
-    # v3: SL/ROI-aware catchup; bump prefix so prior mid-band-only fills don't block.
+    # v4: re-accept catchup after v3 duplicates starved paper (new prefix = new fills).
     if catchup:
         tag = f":{key_tag}" if key_tag else ""
-        key_prefix = f"catchup:v3{tag}:"
+        key_prefix = f"catchup:v4{tag}:"
     else:
         key_prefix = ""
     signal = {

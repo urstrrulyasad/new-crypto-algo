@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
+import { formatDateTime } from '@/lib/datetime'
+import { OrderCard, PositionCard } from '@/components/TradeLedger'
 import { Badge, Button, Callout, Card, Empty, PageShell, PageTitle, Spinner, Stat } from '@/components/ui'
 
 interface Summary {
@@ -32,6 +34,7 @@ interface Position {
   targetPrice?: number | null
   marginCurrency?: string
   openedAt: string
+  closedAt?: string | null
 }
 
 interface Order {
@@ -46,6 +49,8 @@ interface Order {
   createdAt: string
 }
 
+type OrderFilter = 'all' | 'pending' | 'success' | 'failed'
+
 /** LIVE cockpit only — CoinDCX INR wallet + LIVE bot money. No paper. No instrument list. */
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -55,7 +60,7 @@ export default function Dashboard() {
   const [positions, setPositions] = useState<Position[] | null>(null)
   const [orders, setOrders] = useState<Order[] | null>(null)
   const [stopping, setStopping] = useState(false)
-  const [orderFilter, setOrderFilter] = useState<'pending' | 'success' | 'failed'>('pending')
+  const [orderFilter, setOrderFilter] = useState<OrderFilter>('all')
 
   const load = () => {
     api.get<Summary>('/api/v1/portfolio/summary?mode=LIVE').then(setSummary).catch(() => setSummary(null))
@@ -100,22 +105,28 @@ export default function Dashboard() {
   const successOrders = (orders ?? []).filter(isSuccessOrder)
   const failedOrders = (orders ?? []).filter(isFailedOrder)
   const filteredOrders =
-    orderFilter === 'pending' ? pendingOrders : orderFilter === 'success' ? successOrders : failedOrders
+    orderFilter === 'all'
+      ? (orders ?? [])
+      : orderFilter === 'pending'
+        ? pendingOrders
+        : orderFilter === 'success'
+          ? successOrders
+          : failedOrders
 
   return (
     <PageShell>
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
         <PageTitle
           title="Dashboard"
           subtitle="LIVE only — CoinDCX INR futures wallet + live bot PnL and trades"
         />
-        <Button variant="danger" onClick={stopAll} disabled={stopping}>
+        <Button variant="danger" onClick={stopAll} disabled={stopping} className="w-full sm:w-auto">
           {stopping ? 'Stopping…' : 'Stop all futures'}
         </Button>
       </div>
 
       <Callout tone="warn">
-        Paper trading lives on Strategies. This page never shows paper as account money.
+        Paper trading lives on Strategies / Paper Trade. This page never shows paper as account money.
       </Callout>
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
@@ -129,9 +140,7 @@ export default function Dashboard() {
         <Stat label="LIVE open" value={summary?.openPositions ?? '—'} delay={0.15} />
         <Stat label="LIVE win rate" value={summary ? `${(summary.winRate * 100).toFixed(1)}%` : '—'} delay={0.2} />
       </div>
-      {walletErr && (
-        <p className="mt-2 text-xs text-rose-400">Wallet: {walletErr}</p>
-      )}
+      {walletErr && <p className="mt-2 text-xs text-rose-400">Wallet: {walletErr}</p>}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
         <Card delay={0.1}>
@@ -141,66 +150,98 @@ export default function Dashboard() {
           {positions === null ? (
             <Spinner />
           ) : positions.length === 0 ? (
-            <Empty message="No LIVE positions — paper stays on Strategies until the 75% gate promotes." />
+            <Empty message="No LIVE positions yet." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
-                    <th className="pb-2 pr-4">Instrument</th>
-                    <th className="pb-2 pr-4">Side</th>
-                    <th className="pb-2 pr-4">Qty</th>
-                    <th className="pb-2 pr-4">Entry</th>
-                    <th className="pb-2 pr-4">Exit</th>
-                    <th className="pb-2 pr-4">Status</th>
-                    <th className="pb-2">PnL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {positions.slice(0, 30).map((p, i) => (
-                    <motion.tr
-                      key={p.id}
-                      initial={{ opacity: 0, x: -6 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: Math.min(i * 0.03, 0.35) }}
-                      className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
-                      onClick={() =>
-                        navigate(
-                          `/futures/chart/${encodeURIComponent(p.pair)}?mode=live&positionId=${p.id}&timeframe=5m`,
-                        )
-                      }
-                    >
-                      <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
-                      <td className="py-2.5 pr-4">
-                        <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
-                      </td>
-                      <td className="py-2.5 pr-4">{p.quantity}</td>
-                      <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
-                      <td className="py-2.5 pr-4">
-                        {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
-                      </td>
-                      <td className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {p.status === 'CLOSED' ? fmtInr(p.realizedPnl) : '—'}
-                      </td>
-                    </motion.tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="space-y-2 md:hidden">
+                {positions.slice(0, 30).map((p) => (
+                  <PositionCard
+                    key={p.id}
+                    pair={p.pair}
+                    side={p.side}
+                    status={p.status}
+                    quantity={p.quantity}
+                    entryPrice={p.entryPrice}
+                    exitPrice={p.exitPrice}
+                    pnl={p.status === 'CLOSED' ? p.realizedPnl : null}
+                    openedAt={p.openedAt}
+                    closedAt={p.closedAt}
+                    onClick={() =>
+                      navigate(
+                        `/futures/chart/${encodeURIComponent(p.pair)}?mode=live&positionId=${p.id}&timeframe=5m`,
+                      )
+                    }
+                  />
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full min-w-[720px] text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
+                      <th className="pb-2 pr-4">Instrument</th>
+                      <th className="pb-2 pr-4">Side</th>
+                      <th className="pb-2 pr-4">Qty</th>
+                      <th className="pb-2 pr-4">Entry</th>
+                      <th className="pb-2 pr-4">Exit</th>
+                      <th className="pb-2 pr-4">Status</th>
+                      <th className="pb-2 pr-4">PnL</th>
+                      <th className="pb-2 pr-4">Opened</th>
+                      <th className="pb-2">Closed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.slice(0, 30).map((p, i) => (
+                      <motion.tr
+                        key={p.id}
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: Math.min(i * 0.03, 0.35) }}
+                        className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
+                        onClick={() =>
+                          navigate(
+                            `/futures/chart/${encodeURIComponent(p.pair)}?mode=live&positionId=${p.id}&timeframe=5m`,
+                          )
+                        }
+                      >
+                        <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
+                        <td className="py-2.5 pr-4">
+                          <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
+                        </td>
+                        <td className="py-2.5 pr-4">{p.quantity}</td>
+                        <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
+                        <td className="py-2.5 pr-4">
+                          {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
+                        </td>
+                        <td className="py-2.5 pr-4">
+                          <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
+                        </td>
+                        <td className={`py-2.5 pr-4 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {p.status === 'CLOSED' ? fmtInr(p.realizedPnl) : '—'}
+                        </td>
+                        <td className="whitespace-nowrap py-2.5 pr-4 text-xs text-slate-500">
+                          {formatDateTime(p.openedAt)}
+                        </td>
+                        <td className="whitespace-nowrap py-2.5 text-xs text-slate-500">
+                          {formatDateTime(p.closedAt)}
+                        </td>
+                      </motion.tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </Card>
 
         <Card delay={0.15}>
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
             <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
               LIVE orders
             </h2>
             <div className="flex flex-wrap gap-2">
               {(
                 [
+                  ['all', (orders ?? []).length, 'All'],
                   ['pending', pendingOrders.length, 'Pending'],
                   ['success', successOrders.length, 'Success'],
                   ['failed', failedOrders.length, 'Failed'],
@@ -226,49 +267,75 @@ export default function Dashboard() {
           ) : filteredOrders.length === 0 ? (
             <Empty message={`No ${orderFilter} LIVE orders.`} />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
-                    <th className="pb-2 pr-4">Instrument</th>
-                    <th className="pb-2 pr-4">Side</th>
-                    <th className="pb-2 pr-4">Status</th>
-                    <th className="pb-2 pr-4">Qty</th>
-                    <th className="pb-2">Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredOrders.slice(0, 40).map((o, i) => (
-                    <motion.tr
-                      key={o.id}
-                      initial={{ opacity: 0, x: -6 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: Math.min(i * 0.03, 0.35) }}
-                      className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
-                      onClick={() =>
-                        navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
-                      }
-                    >
-                      <td className="py-2.5 pr-4 font-medium text-slate-200">{o.pair}</td>
-                      <td className="py-2.5 pr-4">{o.side}</td>
-                      <td className="py-2.5 pr-4">
-                        <Badge
-                          tone={
-                            isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'
-                          }
+            <>
+              <div className="space-y-2 md:hidden">
+                {filteredOrders.slice(0, 40).map((o) => (
+                  <OrderCard
+                    key={o.id}
+                    pair={o.pair}
+                    side={o.side}
+                    status={o.status}
+                    quantity={o.quantity}
+                    createdAt={o.createdAt}
+                    tone={isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'}
+                    detail={o.error || `₹${Number(o.price).toLocaleString()}`}
+                    onClick={() =>
+                      navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
+                    }
+                  />
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
+                      <th className="pb-2 pr-4">Instrument</th>
+                      <th className="pb-2 pr-4">Side</th>
+                      <th className="pb-2 pr-4">Status</th>
+                      <th className="pb-2 pr-4">Qty</th>
+                      <th className="pb-2 pr-4">Detail</th>
+                      <th className="pb-2">Order time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredOrders.slice(0, 40).map((o, i) => (
+                      <motion.tr
+                        key={o.id}
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: Math.min(i * 0.03, 0.35) }}
+                        className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
+                        onClick={() =>
+                          navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
+                        }
+                      >
+                        <td className="py-2.5 pr-4 font-medium text-slate-200">{o.pair}</td>
+                        <td className="py-2.5 pr-4">{o.side}</td>
+                        <td className="py-2.5 pr-4">
+                          <Badge
+                            tone={
+                              isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'
+                            }
+                          >
+                            {o.status}
+                          </Badge>
+                        </td>
+                        <td className="py-2.5 pr-4">{o.quantity}</td>
+                        <td
+                          className="max-w-[240px] truncate py-2.5 pr-4 text-xs text-slate-500"
+                          title={o.error ?? ''}
                         >
-                          {o.status}
-                        </Badge>
-                      </td>
-                      <td className="py-2.5 pr-4">{o.quantity}</td>
-                      <td className="max-w-[220px] truncate py-2.5 text-xs text-slate-500" title={o.error ?? ''}>
-                        {o.error || `₹${Number(o.price).toLocaleString()}`}
-                      </td>
-                    </motion.tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                          {o.error || `₹${Number(o.price).toLocaleString()}`}
+                        </td>
+                        <td className="whitespace-nowrap py-2.5 text-xs text-slate-300">
+                          {formatDateTime(o.createdAt)}
+                        </td>
+                      </motion.tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </Card>
       </div>

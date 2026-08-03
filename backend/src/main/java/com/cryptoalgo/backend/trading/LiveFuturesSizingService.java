@@ -10,6 +10,7 @@ import java.math.RoundingMode;
 /**
  * Fresh-state LIVE futures sizing from live CoinDCX instrument metadata.
  * Never invents min notional/qty/step; never raises leverage to clear mins.
+ * May bump margin above preferred stake up to max usable wallet room.
  */
 @Component
 public class LiveFuturesSizingService {
@@ -18,10 +19,21 @@ public class LiveFuturesSizingService {
             BigDecimal markPriceUsdt,
             BigDecimal usdtInr,
             int leverage,
-            BigDecimal usableMarginInr,
+            /** Preferred margin (usually bot stake). */
+            BigDecimal preferredMarginInr,
+            /** Hard ceiling from wallet / risk caps — bump may use up to this. */
+            BigDecimal maxUsableMarginInr,
             BigDecimal stoplossFraction,
             CoinDcxFuturesClient.Instrument instrument
-    ) {}
+    ) {
+        /** Tests / callers where preferred == max. */
+        public SizeRequest(BigDecimal markPriceUsdt, BigDecimal usdtInr, int leverage,
+                           BigDecimal usableMarginInr, BigDecimal stoplossFraction,
+                           CoinDcxFuturesClient.Instrument instrument) {
+            this(markPriceUsdt, usdtInr, leverage, usableMarginInr, usableMarginInr,
+                    stoplossFraction, instrument);
+        }
+    }
 
     public record SizeResult(
             boolean ok,
@@ -54,7 +66,7 @@ public class LiveFuturesSizingService {
         if (req.instrument() == null || !req.instrument().hasRequiredSizingFields()) {
             return SizeResult.fail("live instrument missing required sizing fields (min_quantity/min_notional/max_leverage)");
         }
-        if (req.usableMarginInr() == null || req.usableMarginInr().signum() <= 0) {
+        if (req.maxUsableMarginInr() == null || req.maxUsableMarginInr().signum() <= 0) {
             return SizeResult.fail("no usable INR margin under risk caps");
         }
         if (req.leverage() <= 0) {
@@ -72,10 +84,15 @@ public class LiveFuturesSizingService {
         SizeResult liq = liquidationSafety(req.stoplossFraction(), lev, req.instrument());
         if (!liq.ok()) return liq;
 
+        BigDecimal maxUsable = req.maxUsableMarginInr();
+        BigDecimal preferred = req.preferredMarginInr() == null || req.preferredMarginInr().signum() <= 0
+                ? maxUsable
+                : req.preferredMarginInr().min(maxUsable);
+
         BigDecimal price = req.markPriceUsdt();
         BigDecimal usdtInr = req.usdtInr();
         BigDecimal denom = price.multiply(usdtInr);
-        BigDecimal qty = req.usableMarginInr()
+        BigDecimal qty = preferred
                 .multiply(BigDecimal.valueOf(lev))
                 .divide(denom, MathContext.DECIMAL64);
         qty = roundQty(qty, req.instrument(), RoundingMode.DOWN);
@@ -92,11 +109,13 @@ public class LiveFuturesSizingService {
             BigDecimal needNotional = needQty.multiply(price);
             BigDecimal needMargin = needNotional.multiply(usdtInr)
                     .divide(BigDecimal.valueOf(lev), MathContext.DECIMAL64);
-            if (needMargin.compareTo(req.usableMarginInr()) > 0) {
+            if (needMargin.compareTo(maxUsable) > 0) {
                 return SizeResult.fail("need ₹" + needMargin.stripTrailingZeros().toPlainString()
                         + " margin for exchange min notional "
                         + minNotional.toPlainString() + " USDT (usable ₹"
-                        + req.usableMarginInr().stripTrailingZeros().toPlainString() + ")");
+                        + maxUsable.stripTrailingZeros().toPlainString()
+                        + "; preferred stake ₹"
+                        + preferred.stripTrailingZeros().toPlainString() + ")");
             }
             if (req.instrument().maxNotional() != null
                     && req.instrument().maxNotional().signum() > 0
@@ -116,7 +135,7 @@ public class LiveFuturesSizingService {
 
         BigDecimal marginInr = notional.multiply(usdtInr)
                 .divide(BigDecimal.valueOf(lev), MathContext.DECIMAL64);
-        if (marginInr.compareTo(req.usableMarginInr()) > 0) {
+        if (marginInr.compareTo(maxUsable) > 0) {
             return SizeResult.fail("required margin exceeds usable INR after caps");
         }
         if (qty.compareTo(minQty) < 0 || notional.compareTo(minNotional) < 0) {

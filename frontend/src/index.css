@@ -210,13 +210,32 @@ body {
 }
 
 .safe-pad {
-  padding-left: max(1rem, env(safe-area-inset-left));
-  padding-right: max(1rem, env(safe-area-inset-right));
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+}
+
+@media (min-width: 640px) {
+  .safe-pad {
+    padding-left: max(1.25rem, env(safe-area-inset-left));
+    padding-right: max(1.25rem, env(safe-area-inset-right));
+  }
 }
 
 @media (min-width: 768px) {
   .safe-pad {
     padding-left: max(2rem, env(safe-area-inset-left));
     padding-right: max(2rem, env(safe-area-inset-right));
+  }
+}
+
+/* Keep decorative layers from causing horizontal scroll on phones. */
+.orb {
+  max-width: 100vw;
+}
+
+@media (max-width: 639px) {
+  .aurora,
+  .orb {
+    opacity: 0.45;
   }
 }

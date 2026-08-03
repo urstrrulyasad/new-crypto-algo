@@ -184,14 +184,15 @@ export default function Layout() {
           )}
         </AnimatePresence>
 
-        <main className="safe-pad min-w-0 flex-1 py-5 md:py-7 lg:py-8">
+        <main className="safe-pad min-w-0 flex-1 overflow-x-hidden py-5 md:py-7 lg:py-8">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
-              initial={{ opacity: 0, y: 12, filter: 'blur(4px)' }}
-              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              exit={{ opacity: 0, y: -8, filter: 'blur(2px)' }}
-              transition={{ duration: 0.35, ease }}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.28, ease }}
+              className="mx-auto w-full max-w-[1400px]"
             >
               <Outlet />
             </motion.div>

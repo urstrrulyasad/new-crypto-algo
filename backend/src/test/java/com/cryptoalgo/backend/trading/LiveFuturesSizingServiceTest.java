@@ -62,6 +62,23 @@ class LiveFuturesSizingServiceTest {
     }
 
     @Test
+    void bumpsAbovePreferredStakeWithinWalletRoom() {
+        var inst = new CoinDcxFuturesClient.Instrument(
+                "B-X_USDT", BigDecimal.ONE, BigDecimal.valueOf(6),
+                BigDecimal.valueOf(20), BigDecimal.valueOf(100000), BigDecimal.ONE, null, null);
+        // Preferred ₹50 cannot clear min notional 6 USDT at 3x / ₹90 USDTINR
+        // (needs ~₹180), but wallet room ₹500 can.
+        var r = sizing.size(new LiveFuturesSizingService.SizeRequest(
+                BigDecimal.ONE, BigDecimal.valueOf(90), 3,
+                BigDecimal.valueOf(50), BigDecimal.valueOf(500),
+                BigDecimal.valueOf(-0.02), inst));
+        assertTrue(r.ok(), () -> String.valueOf(r.failReason()));
+        assertTrue(r.bumped());
+        assertTrue(r.notionalUsdt().compareTo(BigDecimal.valueOf(6)) >= 0);
+        assertTrue(r.marginInr().compareTo(BigDecimal.valueOf(50)) > 0);
+    }
+
+    @Test
     void conservativeApproxRejectsUnsafeSl() {
         var inst = new CoinDcxFuturesClient.Instrument(
                 "B-X_USDT", BigDecimal.ONE, BigDecimal.valueOf(6),

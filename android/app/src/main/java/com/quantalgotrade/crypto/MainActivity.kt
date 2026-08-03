@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -24,6 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.quantalgotrade.crypto.data.RefreshRequest
 import com.quantalgotrade.crypto.ui.BiometricGateScreen
 import com.quantalgotrade.crypto.ui.LoginScreen
@@ -35,6 +39,9 @@ class MainActivity : FragmentActivity() {
     private val notifyPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { /* granted or not — polling still runs */ }
+
+    /** After this long in background, require biometric again (if enabled). */
+    private val reLockAfterMs = 5 * 60 * 1000L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +58,7 @@ class MainActivity : FragmentActivity() {
                     var forcePassword by remember { mutableStateOf(false) }
                     var bootstrapped by remember { mutableStateOf(false) }
                     var hasRefresh by remember { mutableStateOf(false) }
+                    var backgroundedAt by remember { mutableLongStateOf(0L) }
                     val scope = rememberCoroutineScope()
 
                     LaunchedEffect(Unit) {
@@ -71,6 +79,66 @@ class MainActivity : FragmentActivity() {
                             // keep refresh token; user can unlock / re-login
                         }
                         bootstrapped = true
+                    }
+
+                    DisposableEffect(Unit) {
+                        val observer = LifecycleEventObserver { _, event ->
+                            when (event) {
+                                Lifecycle.Event.ON_STOP -> {
+                                    backgroundedAt = System.currentTimeMillis()
+                                }
+                                Lifecycle.Event.ON_START -> {
+                                    if (!bootstrapped) return@LifecycleEventObserver
+                                    val awayMs = if (backgroundedAt > 0L) {
+                                        System.currentTimeMillis() - backgroundedAt
+                                    } else {
+                                        0L
+                                    }
+                                    // Ignore quick app switches; only re-validate after ~5 minutes.
+                                    if (awayMs < reLockAfterMs) {
+                                        backgroundedAt = 0L
+                                        return@LifecycleEventObserver
+                                    }
+                                    scope.launch {
+                                        try {
+                                            val refresh = container.sessionStore.currentRefreshToken()
+                                            if (refresh.isNullOrBlank()) {
+                                                hasRefresh = false
+                                                unlocked = false
+                                                forcePassword = true
+                                                return@launch
+                                            }
+                                            val refreshed = try {
+                                                val resp = container.api.refresh(RefreshRequest(refresh))
+                                                container.sessionStore.saveSession(
+                                                    resp.accessToken,
+                                                    resp.refreshToken,
+                                                    resp.user,
+                                                )
+                                                hasRefresh = true
+                                                true
+                                            } catch (_: Exception) {
+                                                false
+                                            }
+                                            if (refreshed) {
+                                                // Still inside active refresh window — stay in the app.
+                                                return@launch
+                                            }
+                                            // Session expired: clear access and ask fingerprint (or password).
+                                            container.sessionStore.clearAccessOnly()
+                                            hasRefresh = container.sessionStore.hasSession()
+                                            unlocked = false
+                                            forcePassword = !biometricOn
+                                        } finally {
+                                            backgroundedAt = 0L
+                                        }
+                                    }
+                                }
+                                else -> Unit
+                            }
+                        }
+                        lifecycle.addObserver(observer)
+                        onDispose { lifecycle.removeObserver(observer) }
                     }
 
                     if (!bootstrapped) {
@@ -102,8 +170,10 @@ class MainActivity : FragmentActivity() {
                                                     resp.refreshToken,
                                                     resp.user,
                                                 )
+                                                hasRefresh = true
                                             }
                                         } catch (_: Exception) {
+                                            // stay unlocked only if we already have access token
                                         }
                                     }
                                 },

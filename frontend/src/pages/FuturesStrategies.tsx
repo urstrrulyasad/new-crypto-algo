@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
+import { formatDateTime } from '@/lib/datetime'
+import { OrderCard, PositionCard } from '@/components/TradeLedger'
 import { Badge, Button, Callout, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
 import { CandleChart, type Candle, type TradeMarker } from '@/components/CandleChart'
 
@@ -198,8 +200,8 @@ export default function FuturesStrategies() {
             </h2>
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-3">
-            <div className="space-y-3 xl:col-span-1">
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="space-y-3 lg:col-span-1">
               {coinStrategies.length === 0 ? (
                 <Empty message="No strategies for this coin yet." />
               ) : (
@@ -235,7 +237,7 @@ export default function FuturesStrategies() {
               )}
             </div>
 
-            <div className="xl:col-span-2">
+            <div className="min-w-0 lg:col-span-2">
               {selected ? (
                 <StrategyDetail strategy={selected} />
               ) : (
@@ -554,7 +556,7 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
                   ? ` · bt profit ${s.details.backtestProfit}% WR ${Number(s.details.backtestWinRate ?? 0) * 100}%`
                   : ''}
                 {s.details?.available != null ? ` (INR avail ${s.details.available})` : ''}
-                <span className="ml-2 text-slate-600">{new Date(s.createdAt).toLocaleString()}</span>
+                <span className="ml-2 text-slate-600">{formatDateTime(s.createdAt)}</span>
               </li>
             ))}
           </ul>
@@ -575,40 +577,60 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
           {trades.length === 0 ? (
             <Empty message="No paper trades recorded yet for this strategy." />
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-edge/60">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="px-3 py-2">Mode</th>
-                    <th className="px-3 py-2">Pair</th>
-                    <th className="px-3 py-2">Side</th>
-                    <th className="px-3 py-2">Qty</th>
-                    <th className="px-3 py-2">Entry</th>
-                    <th className="px-3 py-2">Exit</th>
-                    <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2">PnL</th>
-                    <th className="px-3 py-2">Opened</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((t) => (
-                    <tr key={t.id} className="border-t border-edge/40 text-slate-300">
-                      <td className="px-3 py-2"><Badge tone={t.mode === 'LIVE' ? 'success' : 'info'}>{t.mode}</Badge></td>
-                      <td className="px-3 py-2">{t.pair}</td>
-                      <td className="px-3 py-2">{t.side}</td>
-                      <td className="px-3 py-2">{Number(t.quantity)}</td>
-                      <td className="px-3 py-2">₹{Number(t.entryPrice).toLocaleString()}</td>
-                      <td className="px-3 py-2">{t.exitPrice != null ? `₹${Number(t.exitPrice).toLocaleString()}` : '—'}</td>
-                      <td className="px-3 py-2"><Badge tone={t.status === 'OPEN' ? 'warn' : 'default'}>{t.status}</Badge></td>
-                      <td className={`px-3 py-2 ${Number(t.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {t.realizedPnl != null ? `₹${Number(t.realizedPnl).toFixed(2)}` : '—'}
-                      </td>
-                      <td className="px-3 py-2 text-xs text-slate-500">{new Date(t.openedAt).toLocaleString()}</td>
+            <>
+              <div className="space-y-2 md:hidden">
+                {trades.map((t) => (
+                  <PositionCard
+                    key={t.id}
+                    pair={`${t.mode} · ${t.pair}`}
+                    side={t.side}
+                    status={t.status}
+                    quantity={Number(t.quantity)}
+                    entryPrice={Number(t.entryPrice)}
+                    exitPrice={t.exitPrice}
+                    pnl={t.realizedPnl}
+                    openedAt={t.openedAt}
+                    closedAt={t.closedAt}
+                  />
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto rounded-xl border border-edge/60 md:block">
+                <table className="w-full min-w-[860px] text-left text-sm">
+                  <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">Mode</th>
+                      <th className="px-3 py-2">Pair</th>
+                      <th className="px-3 py-2">Side</th>
+                      <th className="px-3 py-2">Qty</th>
+                      <th className="px-3 py-2">Entry</th>
+                      <th className="px-3 py-2">Exit</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2">PnL</th>
+                      <th className="px-3 py-2">Opened</th>
+                      <th className="px-3 py-2">Closed</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {trades.map((t) => (
+                      <tr key={t.id} className="border-t border-edge/40 text-slate-300">
+                        <td className="px-3 py-2"><Badge tone={t.mode === 'LIVE' ? 'success' : 'info'}>{t.mode}</Badge></td>
+                        <td className="px-3 py-2">{t.pair}</td>
+                        <td className="px-3 py-2">{t.side}</td>
+                        <td className="px-3 py-2">{Number(t.quantity)}</td>
+                        <td className="px-3 py-2">₹{Number(t.entryPrice).toLocaleString()}</td>
+                        <td className="px-3 py-2">{t.exitPrice != null ? `₹${Number(t.exitPrice).toLocaleString()}` : '—'}</td>
+                        <td className="px-3 py-2"><Badge tone={t.status === 'OPEN' ? 'warn' : 'default'}>{t.status}</Badge></td>
+                        <td className={`px-3 py-2 ${Number(t.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {t.realizedPnl != null ? `₹${Number(t.realizedPnl).toFixed(2)}` : '—'}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(t.openedAt)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(t.closedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -621,40 +643,56 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
           {orders.length === 0 ? (
             <Empty message="No orders recorded yet for this strategy." />
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-edge/60">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="px-3 py-2">Mode</th>
-                    <th className="px-3 py-2">Side</th>
-                    <th className="px-3 py-2">Qty</th>
-                    <th className="px-3 py-2">Price</th>
-                    <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2">Error</th>
-                    <th className="px-3 py-2">Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {orders.map((o) => (
-                    <tr key={o.id} className="border-t border-edge/40 text-slate-300">
-                      <td className="px-3 py-2"><Badge tone={o.mode === 'LIVE' ? 'success' : 'info'}>{o.mode}</Badge></td>
-                      <td className="px-3 py-2">{o.side}</td>
-                      <td className="px-3 py-2">{Number(o.quantity)}</td>
-                      <td className="px-3 py-2">₹{Number(o.price).toLocaleString()}</td>
-                      <td className="px-3 py-2">
-                        <Badge tone={o.status === 'FAILED' ? 'danger' : o.status === 'FILLED' ? 'success' : 'warn'}>
-                          {o.status}
-                        </Badge>
-                      </td>
-                      <td className="max-w-[240px] truncate px-3 py-2 text-xs text-rose-300" title={o.error ?? ''}>
-                        {o.error ?? '—'}
-                      </td>
-                      <td className="px-3 py-2 text-xs text-slate-500">{new Date(o.createdAt).toLocaleString()}</td>
+            <>
+              <div className="space-y-2 md:hidden">
+                {orders.map((o) => (
+                  <OrderCard
+                    key={o.id}
+                    pair={`${o.mode} · ${o.pair ?? ''}`}
+                    side={o.side}
+                    status={o.status}
+                    quantity={Number(o.quantity)}
+                    createdAt={o.createdAt}
+                    tone={o.status === 'FAILED' ? 'danger' : o.status === 'FILLED' ? 'success' : 'warn'}
+                    detail={o.error || `₹${Number(o.price).toLocaleString()}`}
+                  />
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto rounded-xl border border-edge/60 md:block">
+                <table className="w-full min-w-[780px] text-left text-sm">
+                  <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">Mode</th>
+                      <th className="px-3 py-2">Side</th>
+                      <th className="px-3 py-2">Qty</th>
+                      <th className="px-3 py-2">Price</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2">Error</th>
+                      <th className="px-3 py-2">Order time</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {orders.map((o) => (
+                      <tr key={o.id} className="border-t border-edge/40 text-slate-300">
+                        <td className="px-3 py-2"><Badge tone={o.mode === 'LIVE' ? 'success' : 'info'}>{o.mode}</Badge></td>
+                        <td className="px-3 py-2">{o.side}</td>
+                        <td className="px-3 py-2">{Number(o.quantity)}</td>
+                        <td className="px-3 py-2">₹{Number(o.price).toLocaleString()}</td>
+                        <td className="px-3 py-2">
+                          <Badge tone={o.status === 'FAILED' ? 'danger' : o.status === 'FILLED' ? 'success' : 'warn'}>
+                            {o.status}
+                          </Badge>
+                        </td>
+                        <td className="max-w-[240px] truncate px-3 py-2 text-xs text-rose-300" title={o.error ?? ''}>
+                          {o.error ?? '—'}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(o.createdAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}

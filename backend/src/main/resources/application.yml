@@ -56,9 +56,11 @@ app:
     # Multiple complementary strategies per coin (mean-reversion / trend / breakout).
     max-strategies-per-instrument: ${PIPELINE_MAX_STRATEGIES_PER_INSTRUMENT:3}
     # Don't recreate the same coin+style right after reject/archive.
-    regen-cooldown-hours: ${PIPELINE_REGEN_COOLDOWN_HOURS:24}
+    # Soft cooldown after reject — keep short so new styles can keep generating.
+    regen-cooldown-hours: ${PIPELINE_REGEN_COOLDOWN_HOURS:4}
     min-backtest-trades: ${PIPELINE_MIN_BACKTEST_TRADES:10}
-    max-backtest-drawdown-pct: ${PIPELINE_MAX_BACKTEST_DD:50}
+    # Smoke gate into paper (LIVE still needs paper WR/profit). Was 50 — too strict vs AI strategies.
+    max-backtest-drawdown-pct: ${PIPELINE_MAX_BACKTEST_DD:85}
     # Backtest must also be profitable quality — not just enough trades / DD.
     min-backtest-win-rate: ${PIPELINE_MIN_BACKTEST_WIN_RATE:0.50}
     min-backtest-profit-pct: ${PIPELINE_MIN_BACKTEST_PROFIT_PCT:0}

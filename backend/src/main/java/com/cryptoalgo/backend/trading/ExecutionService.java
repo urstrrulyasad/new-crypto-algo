@@ -373,11 +373,18 @@ public class ExecutionService {
 
                                                     BigDecimal walletCap = available.multiply(
                                                             BigDecimal.valueOf(props.pipeline().maxWalletPct()));
-                                                    BigDecimal usable = bot.stakeAmount()
-                                                            .min(walletCap.subtract(openStake).subtract(reserved).max(BigDecimal.ZERO));
+                                                    BigDecimal maxUsable = walletCap
+                                                            .subtract(openStake)
+                                                            .subtract(reserved)
+                                                            .max(BigDecimal.ZERO);
+                                                    // Prefer bot stake, but allow bump up to wallet room
+                                                    // so CoinDCX min notional (~6 USDT) can clear.
+                                                    BigDecimal preferred = bot.stakeAmount() == null
+                                                            ? maxUsable
+                                                            : bot.stakeAmount().min(maxUsable);
 
                                                     var sized = sizing.size(new LiveFuturesSizingService.SizeRequest(
-                                                            mark, usdtInr, configuredLev, usable,
+                                                            mark, usdtInr, configuredLev, preferred, maxUsable,
                                                             risk.stoploss(), inst));
                                                     if (!sized.ok()) {
                                                         return failLiveFutures(bot, signal, pair, side, mark,

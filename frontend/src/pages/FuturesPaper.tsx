@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
+import { formatDateTime } from '@/lib/datetime'
+import { PositionCard } from '@/components/TradeLedger'
 import { Badge, Button, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface Bot {
@@ -29,6 +31,8 @@ interface Position {
   status: string
   realizedPnl?: number
   marginCurrency?: string
+  openedAt?: string
+  closedAt?: string | null
 }
 
 export default function FuturesPaper() {
@@ -80,12 +84,12 @@ export default function FuturesPaper() {
 
   return (
     <PageShell>
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
         <PageTitle
           title="Futures Paper Trade"
           subtitle="Open & closed paper positions with entry / exit — stop/kill bots only"
         />
-        <Button variant="danger" onClick={stopAll} disabled={stopping}>
+        <Button variant="danger" onClick={stopAll} disabled={stopping} className="w-full sm:w-auto">
           {stopping ? 'Stopping…' : 'Stop all futures'}
         </Button>
       </div>
@@ -180,46 +184,73 @@ function PositionTable({
       {rows.length === 0 ? (
         <Empty message={empty} />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
-                <th className="pb-2 pr-4">Instrument</th>
-                <th className="pb-2 pr-4">Side</th>
-                <th className="pb-2 pr-4">Qty</th>
-                <th className="pb-2 pr-4">Entry</th>
-                <th className="pb-2 pr-4">Exit</th>
-                <th className="pb-2 pr-4">Status</th>
-                <th className="pb-2">PnL</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((p) => (
-                <tr
-                  key={p.id}
-                  className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
-                  onClick={() => onRow(p)}
-                >
-                  <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
-                  <td className="py-2.5 pr-4">
-                    <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
-                  </td>
-                  <td className="py-2.5 pr-4">{p.quantity}</td>
-                  <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
-                  <td className="py-2.5 pr-4">
-                    {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
-                  </td>
-                  <td className="py-2.5 pr-4">
-                    <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
-                  </td>
-                  <td className={`py-2.5 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {p.realizedPnl != null ? `₹${Number(p.realizedPnl).toFixed(2)}` : '—'}
-                  </td>
+        <>
+          <div className="space-y-2 md:hidden">
+            {rows.map((p) => (
+              <PositionCard
+                key={p.id}
+                pair={p.pair}
+                side={p.side}
+                status={p.status}
+                quantity={p.quantity}
+                entryPrice={p.entryPrice}
+                exitPrice={p.exitPrice}
+                pnl={p.realizedPnl}
+                openedAt={p.openedAt}
+                closedAt={p.closedAt}
+                onClick={() => onRow(p)}
+              />
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[780px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
+                  <th className="pb-2 pr-4">Instrument</th>
+                  <th className="pb-2 pr-4">Side</th>
+                  <th className="pb-2 pr-4">Qty</th>
+                  <th className="pb-2 pr-4">Entry</th>
+                  <th className="pb-2 pr-4">Exit</th>
+                  <th className="pb-2 pr-4">Status</th>
+                  <th className="pb-2 pr-4">PnL</th>
+                  <th className="pb-2 pr-4">Opened</th>
+                  <th className="pb-2">Closed</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {rows.map((p) => (
+                  <tr
+                    key={p.id}
+                    className="data-row cursor-pointer border-b border-edge/40 text-slate-300"
+                    onClick={() => onRow(p)}
+                  >
+                    <td className="py-2.5 pr-4 font-medium text-slate-200">{p.pair}</td>
+                    <td className="py-2.5 pr-4">
+                      <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
+                    </td>
+                    <td className="py-2.5 pr-4">{p.quantity}</td>
+                    <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
+                    <td className="py-2.5 pr-4">
+                      {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
+                    </td>
+                    <td className="py-2.5 pr-4">
+                      <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
+                    </td>
+                    <td className={`py-2.5 pr-4 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {p.realizedPnl != null ? `₹${Number(p.realizedPnl).toFixed(2)}` : '—'}
+                    </td>
+                    <td className="whitespace-nowrap py-2.5 pr-4 text-xs text-slate-300">
+                      {formatDateTime(p.openedAt)}
+                    </td>
+                    <td className="whitespace-nowrap py-2.5 text-xs text-slate-300">
+                      {formatDateTime(p.closedAt)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </Card>
   )

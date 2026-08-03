@@ -183,3 +183,23 @@ data class AlertItem(
     val details: Map<String, String> = emptyMap(),
     val createdAt: String? = null,
 )
+
+@Serializable
+data class TradeOrder(
+    val id: String,
+    val pair: String,
+    val side: String,
+    val status: String,
+    val price: Double? = null,
+    val quantity: Double = 0.0,
+    val mode: String? = null,
+    val error: String? = null,
+    val createdAt: String? = null,
+)
+
+@Serializable
+data class ApproveLiveResponse(
+    val ok: Boolean = false,
+    val status: String? = null,
+    val reason: String? = null,
+)
