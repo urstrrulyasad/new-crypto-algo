@@ -311,7 +311,9 @@ public class CoinDcxFuturesClient {
         ObjectNode body = mapper.createObjectNode();
         body.put("timestamp", System.currentTimeMillis());
         body.set("order", order);
-        return signedPost("/exchange/v1/derivatives/futures/orders/create", body, apiKey, apiSecret);
+        return signedPost("/exchange/v1/derivatives/futures/orders/create", body, apiKey, apiSecret)
+                .doOnNext(resp -> log.info("CoinDCX futures create response clientId={}: {}",
+                        clientOrderId, resp));
     }
 
     /** Look up futures orders and find one matching client_order_id (for ambiguous timeout reconcile). */
@@ -325,10 +327,12 @@ public class CoinDcxFuturesClient {
         body.put("pair", pair);
         body.put("page", "1");
         body.put("size", "50");
-        body.put("margin_currency_short_name", "INR");
+        // Docs List Orders / Positions: margin_currency_short_name is an array.
+        body.putArray("margin_currency_short_name").add("INR");
         return signedPost("/exchange/v1/derivatives/futures/orders", body, apiKey, apiSecret)
                 .flatMap(resp -> {
-                    JsonNode list = resp.path("orders");
+                    // Docs: list/create often return a bare JSON array.
+                    JsonNode list = resp != null && resp.isArray() ? resp : resp.path("orders");
                     if (!list.isArray()) list = resp.path("data");
                     if (!list.isArray()) {
                         return Mono.empty();
@@ -345,6 +349,20 @@ public class CoinDcxFuturesClient {
                     log.warn("findOrderByClientOrderId failed: {}", e.getMessage());
                     return Mono.empty();
                 });
+    }
+
+    /**
+     * Open/closed futures positions. CoinDCX returns a JSON array.
+     * marginCurrency: INR or USDT.
+     */
+    public Mono<JsonNode> listPositions(String apiKey, String apiSecret, String marginCurrency) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("timestamp", System.currentTimeMillis());
+        body.put("page", "1");
+        body.put("size", "50");
+        var margins = body.putArray("margin_currency_short_name");
+        margins.add(marginCurrency == null || marginCurrency.isBlank() ? "INR" : marginCurrency);
+        return signedPost("/exchange/v1/derivatives/futures/positions", body, apiKey, apiSecret);
     }
 
     public record WalletBalance(String currency, BigDecimal available) {}

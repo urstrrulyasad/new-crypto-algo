@@ -103,7 +103,7 @@ export default function Bots() {
               <div className="mt-4 flex gap-2">
                 {b.status === 'RUNNING' ? (
                   <Button variant="ghost" onClick={() => action(b.id, 'stop')}>■ Stop</Button>
-                ) : (
+                ) : b.marketType === 'FUTURES' ? null : (
                   <Button onClick={() => action(b.id, 'start')}>▶ Start</Button>
                 )}
                 <Button variant="danger" onClick={() => kill(b.id, !b.killSwitch)}>

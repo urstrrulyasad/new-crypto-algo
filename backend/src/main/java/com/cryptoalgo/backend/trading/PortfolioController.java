@@ -51,19 +51,28 @@ public class PortfolioController {
     }
 
     @GetMapping("/positions")
-    public Flux<Position> positions(@RequestParam(defaultValue = "LIVE") String mode) {
+    public Flux<Map<String, Object>> positions(@RequestParam(defaultValue = "LIVE") String mode) {
         return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), mode)
                 .flatMapMany(ids -> positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
                                 p.tenantId(), p.userId())
-                        .filter(pos -> ids.contains(pos.botId()))));
+                        .filter(pos -> ids.contains(pos.botId()))
+                        .concatMap(this::enrichPosition)));
     }
 
     @GetMapping("/orders")
-    public Flux<TradeOrder> orders(@RequestParam(defaultValue = "LIVE") String mode) {
+    public Flux<Map<String, Object>> orders(@RequestParam(defaultValue = "LIVE") String mode) {
         return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), mode)
-                .flatMapMany(ids -> orders.findByTenantIdAndUserIdOrderByCreatedAtDesc(
-                                p.tenantId(), p.userId())
-                        .filter(o -> ids.contains(o.botId()))));
+                .flatMapMany(ids -> Mono.zip(
+                                orders.findByTenantIdAndUserIdOrderByCreatedAtDesc(
+                                                p.tenantId(), p.userId())
+                                        .filter(o -> ids.contains(o.botId()))
+                                        .collectList(),
+                                positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
+                                                p.tenantId(), p.userId())
+                                        .filter(pos -> ids.contains(pos.botId()))
+                                        .collectList()
+                        ).flatMapMany(t -> Flux.fromIterable(t.getT1())
+                                .concatMap(o -> enrichOrder(o, t.getT2())))));
     }
 
     @GetMapping("/summary")
@@ -91,6 +100,105 @@ public class PortfolioController {
                                         "currency", "INR",
                                         "available", bal,
                                         "source", "CoinDCX futures wallet"))));
+    }
+
+    private Mono<Map<String, Object>> enrichPosition(Position pos) {
+        Map<String, Object> m = positionMap(pos);
+        if (!"OPEN".equals(pos.status())) {
+            m.put("pnl", pos.realizedPnl());
+            return Mono.just(m);
+        }
+        return futures.lastPrice(pos.pair())
+                .map(mark -> {
+                    BigDecimal u = unrealized(pos, mark);
+                    m.put("markPrice", mark);
+                    m.put("unrealizedPnl", u);
+                    m.put("pnl", u);
+                    return m;
+                })
+                .defaultIfEmpty(m);
+    }
+
+    private Mono<Map<String, Object>> enrichOrder(TradeOrder o, List<Position> allPos) {
+        Map<String, Object> m = orderMap(o);
+        boolean entryLike = "BUY".equalsIgnoreCase(o.side()) || "LONG".equalsIgnoreCase(o.side());
+        boolean openish = "OPEN".equals(o.status()) || "SUBMITTING".equals(o.status())
+                || "PENDING_RECONCILE".equals(o.status());
+        if (openish) {
+            Position open = allPos.stream()
+                    .filter(p -> "OPEN".equals(p.status())
+                            && p.botId().equals(o.botId())
+                            && p.pair().equals(o.pair()))
+                    .findFirst().orElse(null);
+            if (open != null) {
+                return futures.lastPrice(open.pair())
+                        .map(mark -> {
+                            m.put("pnl", unrealized(open, mark));
+                            m.put("markPrice", mark);
+                            return m;
+                        })
+                        .defaultIfEmpty(m);
+            }
+            return Mono.just(m);
+        }
+        if ("FILLED".equals(o.status()) || "OPEN".equals(o.status())) {
+            // Prefer closed position realized PnL for same bot/pair near this order.
+            Position closed = allPos.stream()
+                    .filter(p -> "CLOSED".equals(p.status())
+                            && p.botId().equals(o.botId())
+                            && p.pair().equals(o.pair())
+                            && p.realizedPnl() != null)
+                    .findFirst().orElse(null);
+            if (closed != null && !entryLike) {
+                m.put("pnl", closed.realizedPnl());
+            } else if (closed != null && "FILLED".equals(o.status())) {
+                m.put("pnl", closed.realizedPnl());
+            }
+        }
+        return Mono.just(m);
+    }
+
+    private static BigDecimal unrealized(Position pos, BigDecimal mark) {
+        BigDecimal dir = "SHORT".equals(pos.side()) ? BigDecimal.valueOf(-1) : BigDecimal.ONE;
+        BigDecimal lev = pos.leverage() == null ? BigDecimal.ONE : pos.leverage();
+        return mark.subtract(pos.entryPrice()).multiply(pos.quantity()).multiply(dir).multiply(lev);
+    }
+
+    private static Map<String, Object> positionMap(Position pos) {
+        Map<String, Object> m = new HashMap<>();
+        m.put("id", pos.id());
+        m.put("botId", pos.botId());
+        m.put("pair", pos.pair());
+        m.put("side", pos.side());
+        m.put("quantity", pos.quantity());
+        m.put("entryPrice", pos.entryPrice());
+        m.put("exitPrice", pos.exitPrice());
+        m.put("status", pos.status());
+        m.put("realizedPnl", pos.realizedPnl());
+        m.put("leverage", pos.leverage());
+        m.put("slPrice", pos.slPrice());
+        m.put("targetPrice", pos.targetPrice());
+        m.put("marginCurrency", pos.marginCurrency());
+        m.put("openedAt", pos.openedAt());
+        m.put("closedAt", pos.closedAt());
+        return m;
+    }
+
+    private static Map<String, Object> orderMap(TradeOrder o) {
+        Map<String, Object> m = new HashMap<>();
+        m.put("id", o.id());
+        m.put("botId", o.botId());
+        m.put("pair", o.pair());
+        m.put("side", o.side());
+        m.put("status", o.status());
+        m.put("price", o.price());
+        m.put("quantity", o.quantity());
+        m.put("avgPrice", o.avgPrice());
+        m.put("mode", o.mode());
+        m.put("error", o.error());
+        m.put("createdAt", o.createdAt());
+        m.put("updatedAt", o.updatedAt());
+        return m;
     }
 
     private Mono<Set<UUID>> botIds(UUID tenantId, UUID userId, String mode) {
@@ -127,12 +235,7 @@ public class PortfolioController {
         return Flux.fromIterable(filtered)
                 .filter(pos -> "OPEN".equals(pos.status()))
                 .concatMap(pos -> futures.lastPrice(pos.pair())
-                        .map(mark -> {
-                            BigDecimal dir = "SHORT".equals(pos.side())
-                                    ? BigDecimal.valueOf(-1) : BigDecimal.ONE;
-                            return mark.subtract(pos.entryPrice())
-                                    .multiply(pos.quantity()).multiply(dir).multiply(pos.leverage());
-                        })
+                        .map(mark -> unrealized(pos, mark))
                         .defaultIfEmpty(BigDecimal.ZERO))
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
                 .map(unrealized -> {

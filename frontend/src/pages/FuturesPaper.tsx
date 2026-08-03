@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
@@ -8,6 +8,7 @@ import { Badge, Button, Card, Empty, PageShell, PageTitle, Spinner } from '@/com
 
 interface Bot {
   id: string
+  strategyId?: string
   name: string
   mode: string
   marketType: string
@@ -38,6 +39,7 @@ interface Position {
 export default function FuturesPaper() {
   const navigate = useNavigate()
   const [bots, setBots] = useState<Bot[] | null>(null)
+  const [liveStrategyIds, setLiveStrategyIds] = useState<Set<string>>(new Set())
   const [positions, setPositions] = useState<Position[]>([])
   const [stopping, setStopping] = useState(false)
 
@@ -46,6 +48,18 @@ export default function FuturesPaper() {
       .get<Bot[]>('/api/v1/bots?marketType=FUTURES&mode=PAPER')
       .then(setBots)
       .catch(() => setBots([]))
+    api
+      .get<Bot[]>('/api/v1/bots?marketType=FUTURES&mode=LIVE')
+      .then((live) => {
+        setLiveStrategyIds(
+          new Set(
+            live
+              .filter((b) => b.status === 'RUNNING' && b.strategyId)
+              .map((b) => b.strategyId as string),
+          ),
+        )
+      })
+      .catch(() => setLiveStrategyIds(new Set()))
     api
       .get<Position[]>('/api/v1/portfolio/positions?mode=PAPER')
       .then(setPositions)
@@ -82,6 +96,12 @@ export default function FuturesPaper() {
   const open = positions.filter((p) => p.status === 'OPEN')
   const closed = positions.filter((p) => p.status !== 'OPEN')
 
+  // Automated paper: only show RUNNING bots. Hide STOPPED (incl. promoted-to-LIVE).
+  const visibleBots = useMemo(() => {
+    if (!bots) return null
+    return bots.filter((b) => b.status === 'RUNNING')
+  }, [bots, liveStrategyIds])
+
   return (
     <PageShell>
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
@@ -94,54 +114,54 @@ export default function FuturesPaper() {
         </Button>
       </div>
 
-      {bots === null ? (
+      {visibleBots === null ? (
         <Spinner />
-      ) : bots.length === 0 ? (
+      ) : visibleBots.length === 0 ? (
         <Card>
-          <Empty message="No paper bots yet. They appear when a futures strategy passes the backtest gate." />
+          <Empty message="No active paper bots. Promoted strategies run under LIVE on the Dashboard." />
         </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {bots.map((b, i) => (
-            <Card key={b.id} delay={i * 0.04}>
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="font-medium text-slate-100">{b.name}</div>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    <Badge tone="info">{b.mode}</Badge>
-                    <Badge>FUTURES</Badge>
-                    <Badge tone={b.status === 'RUNNING' ? 'success' : 'default'}>{b.status}</Badge>
-                    {b.killSwitch && <Badge tone="danger">KILL</Badge>}
+          {visibleBots.map((b, i) => {
+            const promoted = !!(b.strategyId && liveStrategyIds.has(b.strategyId))
+            return (
+              <Card key={b.id} delay={i * 0.04}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-medium text-slate-100">{b.name}</div>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <Badge tone="info">{b.mode}</Badge>
+                      <Badge>FUTURES</Badge>
+                      <Badge tone={b.status === 'RUNNING' ? 'success' : 'default'}>{b.status}</Badge>
+                      {promoted && <Badge tone="success">LIVE</Badge>}
+                      {b.killSwitch && <Badge tone="danger">KILL</Badge>}
+                    </div>
                   </div>
+                  {b.status === 'RUNNING' && (
+                    <motion.span
+                      animate={{ opacity: [1, 0.3, 1] }}
+                      transition={{ repeat: Infinity, duration: 2 }}
+                      className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400"
+                    />
+                  )}
                 </div>
-                {b.status === 'RUNNING' && (
-                  <motion.span
-                    animate={{ opacity: [1, 0.3, 1] }}
-                    transition={{ repeat: Infinity, duration: 2 }}
-                    className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400"
-                  />
-                )}
-              </div>
-              <div className="mt-3 text-xs text-slate-400">
-                Stake ₹{b.stakeAmount} · {b.leverage ?? 1}x · max {b.maxOpenTrades} open
-              </div>
-              <div className="mt-2 text-xs text-slate-500">
-                Open positions: {open.filter((p) => p.botId === b.id).length}
-              </div>
-              <div className="mt-4 flex gap-2">
-                {b.status === 'RUNNING' ? (
+                <div className="mt-3 text-xs text-slate-400">
+                  Stake ₹{b.stakeAmount} · {b.leverage ?? 1}x · max {b.maxOpenTrades} open
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  Open positions: {open.filter((p) => p.botId === b.id).length}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
                   <Button variant="ghost" onClick={() => action(b.id, 'stop')}>
                     Stop
                   </Button>
-                ) : (
-                  <Button onClick={() => action(b.id, 'start')}>Start</Button>
-                )}
-                <Button variant="danger" onClick={() => kill(b.id, !b.killSwitch)}>
-                  {b.killSwitch ? 'Release kill' : 'Kill switch'}
-                </Button>
-              </div>
-            </Card>
-          ))}
+                  <Button variant="danger" onClick={() => kill(b.id, !b.killSwitch)}>
+                    {b.killSwitch ? 'Release kill' : 'Kill switch'}
+                  </Button>
+                </div>
+              </Card>
+            )
+          })}
         </div>
       )}
 

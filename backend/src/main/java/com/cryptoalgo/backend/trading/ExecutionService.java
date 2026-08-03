@@ -150,6 +150,11 @@ public class ExecutionService {
             log.debug("Bot {} ignores short entry on spot market", bot.id());
             return Mono.empty();
         }
+        // Catchup is paper-only historical replay — never place LIVE exchange orders from it.
+        if ("LIVE".equals(bot.mode()) && isPaperCatchup(signal)) {
+            log.info("Bot {} skipped LIVE entry on catchup signal {}", bot.id(), signal.id());
+            return Mono.empty();
+        }
         return positions.countByBotIdAndStatus(bot.id(), "OPEN")
                 .filter(open -> open < bot.maxOpenTrades())
                 .flatMap(open -> positions.findByBotIdAndPairAndStatus(bot.id(), signal.pair(), "OPEN")
@@ -186,6 +191,10 @@ public class ExecutionService {
     // ------------------------------------------------------------------- exit
 
     private Mono<Bot> exit(Bot bot, Signal signal) {
+        if ("LIVE".equals(bot.mode()) && isPaperCatchup(signal)) {
+            log.info("Bot {} skipped LIVE exit on catchup signal {}", bot.id(), signal.id());
+            return Mono.empty();
+        }
         return positions.findByBotIdAndPairAndStatus(bot.id(), signal.pair(), "OPEN")
                 .flatMap(pos -> resolveFillPrice(bot, signal)
                         .flatMap(price -> "PAPER".equals(bot.mode())
@@ -390,11 +399,18 @@ public class ExecutionService {
                                                             + " maxLev=" + inst.maxLeverage());
                                         }
 
+                                        // `available` is CoinDCX free INR (balance - locked). Do NOT
+                                        // subtract openStake again — that double-counts locked margin.
                                         BigDecimal walletCap = available.multiply(
                                                 BigDecimal.valueOf(props.pipeline().maxWalletPct()));
+                                        BigDecimal assetCap = available.multiply(
+                                                BigDecimal.valueOf(props.pipeline().maxAssetExposurePct()));
+                                        BigDecimal stratCap = available.multiply(
+                                                BigDecimal.valueOf(props.pipeline().maxStrategyExposurePct()));
                                         BigDecimal maxUsable = walletCap
-                                                .subtract(openStake)
                                                 .subtract(reserved)
+                                                .min(assetCap)
+                                                .min(stratCap)
                                                 .max(BigDecimal.ZERO);
                                         BigDecimal preferred = bot.stakeAmount() == null
                                                 ? maxUsable
@@ -415,7 +431,7 @@ public class ExecutionService {
                                                         return failLiveFutures(bot, signal, pair, side, mark,
                                                                 sized.qty(), clientOrderId, decision.reason());
                                                     }
-                                                    BigDecimal maxReservable = walletCap.subtract(openStake);
+                                                    BigDecimal maxReservable = walletCap;
                                                     return riskGate.tryReserve(bot.tenantId(),
                                                                     sized.marginInr(), maxReservable)
                                                             .flatMap(reservedOk -> {
@@ -451,38 +467,21 @@ public class ExecutionService {
         return futuresClient.placeOrder(key.apiKey(), key.apiSecret(), pair, side,
                         sized.qty(), leverage, margin, null, null, clientOrderId)
                 .flatMap(resp -> {
-                    String exchangeId = resp.path("id").asText(
-                            resp.path("orders").path(0).path("id").asText(null));
-                    TradeOrder open = new TradeOrder(orderId, bot.tenantId(), bot.userId(), bot.id(),
-                            signal.id(), exchangeId, clientOrderId, pair, side.toUpperCase(),
-                            "MARKET_ORDER", "FUTURES", "LIVE", "OPEN",
-                            mark, sized.qty(), sized.qty(), mark, BigDecimal.ZERO, null,
-                            Instant.now(), Instant.now());
-                    Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(),
-                            bot.id(), pair, posSide, sized.qty(), mark, null, bot.leverage(),
-                            "OPEN", null, slPrice, targetPrice, null, margin,
-                            Instant.now(), null);
-                    return template.getDatabaseClient().sql("""
-                                    UPDATE orders SET exchange_order_id = :eid, status = 'OPEN',
-                                      filled_qty = :fq, avg_price = :ap, updated_at = :now
-                                    WHERE id = :id
-                                    """)
-                            .bind("eid", exchangeId)
-                            .bind("fq", sized.qty())
-                            .bind("ap", mark)
-                            .bind("now", Instant.now())
-                            .bind("id", orderId)
-                            .fetch().rowsUpdated()
-                            .then(template.insert(pos))
-                            .then(riskGate.release(bot.tenantId(), sized.marginInr()))
-                            .then(armProtection(bot, pos))
-                            .then(audit.record(bot.tenantId(), bot.userId(),
-                                    "LIVE_FUTURES_ORDER", "ORDER", orderId,
-                                    Map.of("pair", pair, "side", side,
-                                            "qty", sized.qty().toPlainString(),
-                                            "marginInr", sized.marginInr().toPlainString(),
-                                            "bumped", String.valueOf(sized.bumped()),
-                                            "liqCheck", String.valueOf(sized.liquidationCheck()))));
+                    log.info("LIVE placeOrder OK clientId={} pair={} resp={}",
+                            clientOrderId, pair, resp);
+                    String exchangeId = extractExchangeOrderId(resp);
+                    Mono<String> eidMono = (exchangeId != null && !exchangeId.isBlank())
+                            ? Mono.just(exchangeId)
+                            : futuresClient.findOrderByClientOrderId(
+                                            key.apiKey(), key.apiSecret(), pair, clientOrderId)
+                                    .map(ExecutionService::extractExchangeOrderId)
+                                    .filter(id -> id != null && !id.isBlank())
+                                    .switchIfEmpty(Mono.error(new IllegalStateException(
+                                            "LIVE order accepted but exchange id missing; "
+                                                    + "clientOrderId=" + clientOrderId)));
+                    return eidMono.flatMap(eid -> completeLiveFuturesFill(
+                            bot, signal, pair, side, margin, mark, posSide, slPrice, targetPrice,
+                            sized, clientOrderId, orderId, eid));
                 })
                 .onErrorResume(e -> {
                     boolean ambiguous = isAmbiguousSubmitError(e);
@@ -519,6 +518,71 @@ public class ExecutionService {
                                     Map.of("pair", pair, "error", String.valueOf(e.getMessage()))))
                             .then();
                 });
+    }
+
+    private Mono<Void> completeLiveFuturesFill(Bot bot, Signal signal, String pair, String side,
+                                               String margin, BigDecimal mark, String posSide,
+                                               BigDecimal slPrice, BigDecimal targetPrice,
+                                               LiveFuturesSizingService.SizeResult sized,
+                                               String clientOrderId, UUID orderId, String exchangeId) {
+        Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(),
+                bot.id(), pair, posSide, sized.qty(), mark, null, bot.leverage(),
+                "OPEN", null, slPrice, targetPrice, null, margin,
+                Instant.now(), null);
+        var update = template.getDatabaseClient().sql("""
+                        UPDATE orders SET exchange_order_id = :eid, status = 'OPEN',
+                          filled_qty = :fq, avg_price = :ap, updated_at = :now
+                        WHERE id = :id
+                        """)
+                .bind("eid", exchangeId)
+                .bind("fq", sized.qty())
+                .bind("ap", mark)
+                .bind("now", Instant.now())
+                .bind("id", orderId)
+                .fetch().rowsUpdated();
+        return update
+                .then(template.insert(pos))
+                .then(riskGate.release(bot.tenantId(), sized.marginInr()))
+                .then(armProtection(bot, pos))
+                .then(audit.record(bot.tenantId(), bot.userId(),
+                        "LIVE_FUTURES_ORDER", "ORDER", orderId,
+                        Map.of("pair", pair, "side", side,
+                                "qty", sized.qty().toPlainString(),
+                                "marginInr", sized.marginInr().toPlainString(),
+                                "bumped", String.valueOf(sized.bumped()),
+                                "liqCheck", String.valueOf(sized.liquidationCheck()),
+                                "exchangeOrderId", exchangeId)));
+    }
+
+    static String extractExchangeOrderId(com.fasterxml.jackson.databind.JsonNode resp) {
+        if (resp == null || resp.isNull() || resp.isMissingNode()) return null;
+        String[] direct = {
+                textId(resp, "id"),
+                textId(resp, "order_id"),
+                textId(resp.path("order"), "id"),
+                textId(resp.path("order"), "order_id"),
+                textId(resp.path("data"), "id"),
+                textId(resp.path("data").path("order"), "id"),
+                textId(resp.path("orders").path(0), "id"),
+                textId(resp.path("orders").path(0), "order_id"),
+        };
+        for (String id : direct) {
+            if (id != null && !id.isBlank() && !"null".equalsIgnoreCase(id)) return id;
+        }
+        if (resp.isArray() && !resp.isEmpty()) {
+            String id = textId(resp.get(0), "id");
+            if (id == null) id = textId(resp.get(0), "order_id");
+            if (id != null && !id.isBlank()) return id;
+        }
+        return null;
+    }
+
+    private static String textId(com.fasterxml.jackson.databind.JsonNode node, String field) {
+        if (node == null || node.isMissingNode() || node.isNull() || !node.has(field)) return null;
+        var v = node.get(field);
+        if (v == null || v.isNull() || v.isMissingNode()) return null;
+        String s = v.asText(null);
+        return s == null || s.isBlank() ? null : s;
     }
 
     private Mono<Void> armProtection(Bot bot, Position pos) {
@@ -581,11 +645,15 @@ public class ExecutionService {
                 .then(skip(bot, signal, reason));
     }
 
-    /** Deterministic ≤80-char client order id for LIVE futures. */
+    /**
+     * Deterministic client order id for LIVE futures.
+     * CoinDCX rejects ids longer than 36 characters (DB column is 80).
+     */
     static String compactClientOrderId(UUID signalId, UUID botId) {
-        String raw = "caf-" + signalId.toString().replace("-", "")
-                + botId.toString().replace("-", "");
-        return raw.length() <= 80 ? raw : raw.substring(0, 80);
+        String sig = signalId.toString().replace("-", "");
+        String bot = botId.toString().replace("-", "");
+        // 2 + 16 + 16 = 34 ≤ 36
+        return "ca" + sig.substring(0, 16) + bot.substring(0, 16);
     }
 
     private static boolean isAmbiguousSubmitError(Throwable e) {
@@ -594,7 +662,8 @@ public class ExecutionService {
             String n = c.getClass().getName();
             String m = String.valueOf(c.getMessage()).toLowerCase();
             if (n.contains("Timeout") || m.contains("timeout") || m.contains("timed out")
-                    || m.contains("connection reset") || m.contains("premature")) {
+                    || m.contains("connection reset") || m.contains("premature")
+                    || m.contains("exchange id missing") || m.contains("bindnull")) {
                 return true;
             }
             c = c.getCause();
@@ -684,21 +753,29 @@ public class ExecutionService {
         int leverage = bot.leverage() == null ? props.pipeline().futuresLeverage()
                 : bot.leverage().intValue();
         String margin = bot.marginCurrency() == null ? "INR" : bot.marginCurrency();
+        String clientOrderId = compactClientOrderId(
+                signalId != null ? signalId : pos.id(), bot.id());
         return withKey(bot).flatMap(key -> futuresClient.placeOrder(
                         key.apiKey(), key.apiSecret(), pos.pair(), closeSide,
-                        pos.quantity(), leverage, margin, null, null)
+                        pos.quantity(), leverage, margin, null, null, clientOrderId)
                 .flatMap(resp -> {
+                    log.info("LIVE exit placeOrder OK clientId={} pair={} resp={}",
+                            clientOrderId, pos.pair(), resp);
+                    String exchangeId = extractExchangeOrderId(resp);
+                    if (exchangeId == null || exchangeId.isBlank()) {
+                        exchangeId = clientOrderId; // persist somehow; position still closes
+                    }
                     TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(),
                             bot.userId(), bot.id(), signalId,
-                            resp.path("id").asText(resp.path("orders").path(0).path("id").asText(null)),
-                            "ca-fx-" + UUID.randomUUID(), pos.pair(), closeSide.toUpperCase(),
-                            "MARKET_ORDER", "FUTURES", "LIVE", "OPEN",
+                            exchangeId, clientOrderId, pos.pair(), closeSide.toUpperCase(),
+                            "MARKET_ORDER", "FUTURES", "LIVE", "FILLED",
                             price, pos.quantity(), pos.quantity(), price, BigDecimal.ZERO, null,
                             Instant.now(), Instant.now());
                     return template.insert(order).then(closePosition(pos, price))
                             .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_FUTURES_EXIT",
                                     "POSITION", pos.id(), Map.of("pair", pos.pair(),
-                                            "price", price.toPlainString(), "reason", reason)));
+                                            "price", price.toPlainString(), "reason", reason,
+                                            "exchangeOrderId", exchangeId)));
                 }));
     }
 

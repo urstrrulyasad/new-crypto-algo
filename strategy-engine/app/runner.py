@@ -244,10 +244,10 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
 async def _post_signal(item: dict, pair: str, timeframe: str, action: str,
                        price: float, candle_ts: str, *, catchup: bool,
                        key_tag: str = "") -> dict:
-    # v5: re-accept catchup after LIVE/instrument outage starved new paper bars.
+    # v6: re-accept catchup after paper bots were wrongly purged / starved.
     if catchup:
         tag = f":{key_tag}" if key_tag else ""
-        key_prefix = f"catchup:v5{tag}:"
+        key_prefix = f"catchup:v6{tag}:"
     else:
         key_prefix = ""
     signal = {

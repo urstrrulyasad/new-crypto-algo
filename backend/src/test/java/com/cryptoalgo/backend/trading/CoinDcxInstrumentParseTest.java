@@ -57,11 +57,30 @@ class CoinDcxInstrumentParseTest {
     }
 
     @Test
-    void compactClientOrderIdFitsVarchar80() {
+    void compactClientOrderIdFitsCoinDcxMax36() {
         var signal = java.util.UUID.fromString("469f4cbb-eb54-4a0e-b90f-74144c8ed331");
         var bot = java.util.UUID.fromString("4c72c784-4ac4-43a4-9e8d-da2a064dcf52");
         String id = ExecutionService.compactClientOrderId(signal, bot);
-        assertTrue(id.length() <= 80, id);
+        assertTrue(id.length() <= 36, id + " len=" + id.length());
+        assertEquals(34, id.length());
         assertFalse(id.contains("-fail-"));
+    }
+
+    @Test
+    void extractExchangeOrderIdFromFuturesArrayResponse() throws Exception {
+        // CoinDCX futures create returns a bare array (docs Create Order response).
+        String json = """
+                [{
+                  "id":"c87ca633-6218-44ea-900b-e86981358cbd",
+                  "pair":"B-TAG_USDT",
+                  "side":"buy",
+                  "status":"initial",
+                  "order_type":"market_order",
+                  "total_quantity":100.0
+                }]
+                """;
+        var node = new ObjectMapper().readTree(json);
+        assertEquals("c87ca633-6218-44ea-900b-e86981358cbd",
+                ExecutionService.extractExchangeOrderId(node));
     }
 }

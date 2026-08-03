@@ -173,43 +173,64 @@ public class PaperEvaluationService {
                         });
             });
         }
-        return paperStats.forStrategy(strategy.id()).flatMap(stats ->
-                backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
-                                strategy.tenantId(), strategy.id())
-                        .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
-                        .next()
-                        .flatMap(bt -> {
-                            JsonNode metrics = readMetrics(bt.metrics());
-                            if (!pipeline.passesLiveBacktestQuality(metrics)) {
-                                return archiveUnpromotable(strategy, stats, metrics);
+        // PAPER_TRADING: never purge on backtest LIVE quality — smoke gate already allowed paper.
+        // Accumulate paper fills (catchup + live signals); promote only when paper gate + LIVE BT pass.
+        return ensurePaperBotRunning(strategy).then(paperStats.forStrategy(strategy.id()).flatMap(stats -> {
+            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
+                return kickPaperCatchup(strategy);
+            }
+            if (!passesLivePaperGate(stats)) {
+                double stake = props.pipeline().paperStake().doubleValue();
+                double profitPct = stake <= 0 ? 0
+                        : (stats.totalPnl().doubleValue() / stake) * 100.0;
+                log.info("Paper gate trades met for {} ({}/{}) but WR {} / profit {}% — need WR>={} or profit>={}%",
+                        strategy.instrument(), stats.closedTrades(),
+                        props.pipeline().minPaperTrades(),
+                        stats.winRate(), String.format("%.1f", profitPct),
+                        props.pipeline().winRateThreshold(),
+                        props.pipeline().minPaperProfitPct());
+                return Mono.empty();
+            }
+            return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
+                            strategy.tenantId(), strategy.id())
+                    .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
+                    .next()
+                    .flatMap(bt -> {
+                        JsonNode metrics = readMetrics(bt.metrics());
+                        if (!pipeline.passesLiveBacktestQuality(metrics)) {
+                            // Paper passed gate but BT cannot support LIVE — keep paper, do not purge.
+                            if (badBacktestLogged.add(strategy.id())) {
+                                log.info("Paper OK for {} but LIVE backtest quality FAIL — staying on paper",
+                                        strategy.instrument());
                             }
-                            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
-                                return kickPaperCatchup(strategy);
-                            }
-                            if (!passesLivePaperGate(stats)) {
-                                double stake = props.pipeline().paperStake().doubleValue();
-                                double profitPct = stake <= 0 ? 0
-                                        : (stats.totalPnl().doubleValue() / stake) * 100.0;
-                                log.info("Paper gate trades met for {} ({}/{}) but WR {} / profit {}% — need WR>={} or profit>={}%",
-                                        strategy.instrument(), stats.closedTrades(),
-                                        props.pipeline().minPaperTrades(),
-                                        stats.winRate(), String.format("%.1f", profitPct),
-                                        props.pipeline().winRateThreshold(),
-                                        props.pipeline().minPaperProfitPct());
-                                return Mono.empty();
-                            }
-                            badBacktestLogged.remove(strategy.id());
-                            return promote(strategy, stats);
-                        })
-                        .switchIfEmpty(Mono.defer(() -> {
-                            if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
-                                return kickPaperCatchup(strategy);
-                            }
-                            return audit.record(strategy.tenantId(), strategy.userId(),
-                                            "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY",
-                                            strategy.id(), Map.of())
-                                    .then();
-                        })));
+                            return Mono.empty();
+                        }
+                        badBacktestLogged.remove(strategy.id());
+                        return promote(strategy, stats);
+                    })
+                    .switchIfEmpty(audit.record(strategy.tenantId(), strategy.userId(),
+                                    "AUTO_LIVE_SKIPPED_NO_BACKTEST", "STRATEGY",
+                                    strategy.id(), Map.of())
+                            .then());
+        }));
+    }
+
+    /** Keep paper bots RUNNING for PAPER_TRADING strategies (no LIVE sibling). */
+    private Mono<Void> ensurePaperBotRunning(Strategy strategy) {
+        return bots.findByStrategyId(strategy.id())
+                .filter(b -> "LIVE".equals(b.mode()) && "RUNNING".equals(b.status()))
+                .hasElements()
+                .flatMap(hasLive -> {
+                    if (hasLive) return Mono.empty();
+                    return bots.findByStrategyId(strategy.id())
+                            .filter(b -> "PAPER".equals(b.mode()))
+                            .next()
+                            .flatMap(b -> {
+                                if ("RUNNING".equals(b.status()) && !b.killSwitch()) return Mono.empty();
+                                if (b.killSwitch()) return Mono.empty();
+                                return bots.save(withStatus(b, "RUNNING")).then();
+                            });
+                });
     }
 
     private Mono<Void> archiveUnpromotable(Strategy strategy, PaperStatsService.PaperStats stats,
@@ -240,9 +261,9 @@ public class PaperEvaluationService {
     }
 
     /**
-     * Replay CoinDCX candles into paper fills. Serialized globally and only for
-     * strategies whose latest DONE backtest already passes LIVE quality — otherwise
-     * we burn the engine on coins that can never promote.
+     * Replay CoinDCX candles into paper fills. Serialized globally.
+     * Allowed for any PAPER_TRADING strategy (smoke already passed); LIVE BT quality
+     * is only required at promotion time.
      */
     private Mono<Void> kickPaperCatchup(Strategy strategy) {
         if (strategy.instrument() == null || strategy.sourceCode() == null) return Mono.empty();
@@ -251,53 +272,40 @@ public class PaperEvaluationService {
         if (last != null && now - last < CATCHUP_COOLDOWN_MS) return Mono.empty();
         if (catchupBusy.get()) return Mono.empty();
         if (!catchupStarted.add(strategy.id())) return Mono.empty();
-
-        return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
-                        strategy.tenantId(), strategy.id())
-                .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
-                .next()
-                .flatMap(bt -> {
-                    JsonNode metrics = readMetrics(bt.metrics());
-                    if (!pipeline.passesLiveBacktestQuality(metrics)) {
-                        catchupStarted.remove(strategy.id());
-                        return Mono.empty();
-                    }
-                    if (!catchupBusy.compareAndSet(false, true)) {
-                        catchupStarted.remove(strategy.id());
-                        return Mono.empty();
-                    }
-                    catchupLastStartedMs.put(strategy.id(), now);
-                    String tf = "5m";
-                    try {
-                        if (strategy.config() != null) {
-                            tf = mapper.readTree(strategy.config().asString()).path("timeframe").asText("5m");
-                        }
-                    } catch (Exception ignored) {
-                        // default 5m
-                    }
-                    Map<String, Object> req = Map.of(
-                            "tenant_id", strategy.tenantId().toString(),
-                            "strategy_id", strategy.id().toString(),
-                            "source_code", strategy.sourceCode(),
-                            "pairs", List.of(strategy.instrument()),
-                            "timeframe", tf,
-                            "market_type", "FUTURES",
-                            "bars", CATCHUP_BARS
-                    );
-                    log.info("Paper catchup starting for {} ({}) bars={}",
-                            strategy.instrument(), strategy.id(), CATCHUP_BARS);
-                    return engine.paperCatchup(req)
-                            .doOnNext(r -> log.info("Paper catchup done for {}: {}", strategy.instrument(), r))
-                            .doOnError(e -> log.warn("Paper catchup failed for {}: {}",
-                                    strategy.instrument(), e.getMessage()))
-                            .doFinally(sig -> {
-                                catchupStarted.remove(strategy.id());
-                                catchupBusy.set(false);
-                            })
-                            .onErrorResume(e -> Mono.empty())
-                            .then();
+        if (!catchupBusy.compareAndSet(false, true)) {
+            catchupStarted.remove(strategy.id());
+            return Mono.empty();
+        }
+        catchupLastStartedMs.put(strategy.id(), now);
+        String tf = "5m";
+        try {
+            if (strategy.config() != null) {
+                tf = mapper.readTree(strategy.config().asString()).path("timeframe").asText("5m");
+            }
+        } catch (Exception ignored) {
+            // default 5m
+        }
+        Map<String, Object> req = Map.of(
+                "tenant_id", strategy.tenantId().toString(),
+                "strategy_id", strategy.id().toString(),
+                "source_code", strategy.sourceCode(),
+                "pairs", List.of(strategy.instrument()),
+                "timeframe", tf,
+                "market_type", "FUTURES",
+                "bars", CATCHUP_BARS
+        );
+        log.info("Paper catchup starting for {} ({}) bars={}",
+                strategy.instrument(), strategy.id(), CATCHUP_BARS);
+        return engine.paperCatchup(req)
+                .doOnNext(r -> log.info("Paper catchup done for {}: {}", strategy.instrument(), r))
+                .doOnError(e -> log.warn("Paper catchup failed for {}: {}",
+                        strategy.instrument(), e.getMessage()))
+                .doFinally(sig -> {
+                    catchupStarted.remove(strategy.id());
+                    catchupBusy.set(false);
                 })
-                .switchIfEmpty(Mono.fromRunnable(() -> catchupStarted.remove(strategy.id())).then());
+                .onErrorResume(e -> Mono.empty())
+                .then();
     }
 
     private JsonNode readMetrics(io.r2dbc.postgresql.codec.Json json) {

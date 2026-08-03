@@ -80,30 +80,32 @@ public class LivePortfolioRiskService {
                     if (liveCount > props.pipeline().maxLiveBots()) {
                         return RiskDecision.fail("maxLiveBots exceeded", snap);
                     }
+                    // walletAvailableInr is free Cash (exchange already deducted locked margin).
+                    // Cap new entries against free cash only — portfolio/openStake is informational.
                     BigDecimal wallet = nz(walletAvailableInr);
                     BigDecimal reserved = nz(reservedInr);
                     BigDecimal add = nz(additionalMarginInr);
                     BigDecimal walletCap = wallet.multiply(
                             BigDecimal.valueOf(props.pipeline().maxWalletPct()));
-                    if (portfolio.add(reserved).add(add).compareTo(walletCap) > 0) {
+                    if (reserved.add(add).compareTo(walletCap) > 0) {
                         return RiskDecision.fail("portfolio wallet cap exceeded after fill", snap);
                     }
                     BigDecimal assetCap = wallet.multiply(
                             BigDecimal.valueOf(props.pipeline().maxAssetExposurePct()));
-                    if (asset.add(add).compareTo(assetCap) > 0) {
+                    // asset/strategy open stakes are already locked on exchange; only gate the new add.
+                    if (add.compareTo(assetCap) > 0) {
                         return RiskDecision.fail("asset exposure cap exceeded", snap);
                     }
                     BigDecimal stratCap = wallet.multiply(
                             BigDecimal.valueOf(props.pipeline().maxStrategyExposurePct()));
-                    if (strategy.add(add).compareTo(stratCap) > 0) {
+                    if (add.compareTo(stratCap) > 0) {
                         return RiskDecision.fail("strategy exposure cap exceeded", snap);
                     }
                     if (botOpen >= bot.maxOpenTrades()) {
                         return RiskDecision.fail("bot maxOpenTrades reached", snap);
                     }
-                    if (bot.stakeAmount() != null && add.compareTo(bot.stakeAmount()) > 0) {
-                        return RiskDecision.fail("exceeds per-bot stake cap", snap);
-                    }
+                    // stakeAmount is preferred margin only — LiveFuturesSizingService may bump
+                    // above it up to wallet/asset/strategy caps to clear CoinDCX min notional.
                     if (pending > 20) {
                         return RiskDecision.fail("too many pending LIVE orders", snap);
                     }

@@ -60,11 +60,8 @@ public class OrderReconciliationService {
                         .flatMap(key -> {
                             String apiKey = crypto.decrypt(key.apiKeyEnc());
                             String apiSecret = crypto.decrypt(key.apiSecretEnc());
-                            if ("FUTURES".equals(order.marketType())
-                                    && (order.exchangeOrderId() == null
-                                    || "PENDING_RECONCILE".equals(order.status())
-                                    || "UNKNOWN".equals(order.status())
-                                    || "SUBMITTING".equals(order.status()))) {
+                            if ("FUTURES".equals(order.marketType())) {
+                                // Futures never use spot /orders/status (404). Always list by pair/client id.
                                 return futures.findOrderByClientOrderId(apiKey, apiSecret,
                                                 order.pair(), order.clientOrderId())
                                         .flatMap(ex -> settleFromExchange(order, ex))

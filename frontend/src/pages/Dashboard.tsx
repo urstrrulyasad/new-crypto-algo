@@ -30,6 +30,9 @@ interface Position {
   exitPrice?: number
   status: string
   realizedPnl?: number
+  unrealizedPnl?: number | null
+  pnl?: number | null
+  markPrice?: number | null
   slPrice?: number | null
   targetPrice?: number | null
   marginCurrency?: string
@@ -47,6 +50,8 @@ interface Order {
   mode: string
   error?: string | null
   createdAt: string
+  pnl?: number | null
+  markPrice?: number | null
 }
 
 type OrderFilter = 'all' | 'pending' | 'success' | 'failed'
@@ -163,7 +168,7 @@ export default function Dashboard() {
                     quantity={p.quantity}
                     entryPrice={p.entryPrice}
                     exitPrice={p.exitPrice}
-                    pnl={p.status === 'CLOSED' ? p.realizedPnl : null}
+                    pnl={p.status === 'CLOSED' ? p.realizedPnl : (p.pnl ?? p.unrealizedPnl ?? null)}
                     openedAt={p.openedAt}
                     closedAt={p.closedAt}
                     onClick={() =>
@@ -215,8 +220,18 @@ export default function Dashboard() {
                         <td className="py-2.5 pr-4">
                           <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
                         </td>
-                        <td className={`py-2.5 pr-4 ${(p.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {p.status === 'CLOSED' ? fmtInr(p.realizedPnl) : '—'}
+                        <td
+                          className={`py-2.5 pr-4 ${
+                            Number(p.status === 'CLOSED' ? p.realizedPnl : (p.pnl ?? p.unrealizedPnl) ?? 0) >= 0
+                              ? 'text-emerald-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {p.status === 'CLOSED'
+                            ? fmtInr(p.realizedPnl)
+                            : p.pnl != null || p.unrealizedPnl != null
+                              ? fmtInr(p.pnl ?? p.unrealizedPnl)
+                              : '—'}
                         </td>
                         <td className="whitespace-nowrap py-2.5 pr-4 text-xs text-slate-500">
                           {formatDateTime(p.openedAt)}
@@ -278,7 +293,12 @@ export default function Dashboard() {
                     quantity={o.quantity}
                     createdAt={o.createdAt}
                     tone={isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'}
-                    detail={o.error || `₹${Number(o.price).toLocaleString()}`}
+                    detail={
+                      o.error ||
+                      (o.pnl != null
+                        ? `PnL ${fmtInr(o.pnl)} · ₹${Number(o.price).toLocaleString()}`
+                        : `₹${Number(o.price).toLocaleString()}`)
+                    }
                     onClick={() =>
                       navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
                     }
@@ -293,6 +313,7 @@ export default function Dashboard() {
                       <th className="pb-2 pr-4">Side</th>
                       <th className="pb-2 pr-4">Status</th>
                       <th className="pb-2 pr-4">Qty</th>
+                      <th className="pb-2 pr-4">PnL</th>
                       <th className="pb-2 pr-4">Detail</th>
                       <th className="pb-2">Order time</th>
                     </tr>
@@ -321,6 +342,13 @@ export default function Dashboard() {
                           </Badge>
                         </td>
                         <td className="py-2.5 pr-4">{o.quantity}</td>
+                        <td
+                          className={`py-2.5 pr-4 ${
+                            o.pnl == null ? 'text-slate-500' : o.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          {o.pnl != null ? fmtInr(o.pnl) : '—'}
+                        </td>
                         <td
                           className="max-w-[240px] truncate py-2.5 pr-4 text-xs text-slate-500"
                           title={o.error ?? ''}
