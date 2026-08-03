@@ -368,6 +368,19 @@ public class CoinDcxFuturesClient {
     public record WalletBalance(String currency, BigDecimal available) {}
 
     /**
+     * CoinDCX futures INR wallet fields.
+     * Docs/socket: {@code balance} is already usable/available; {@code locked_balance}
+     * is margin locked in open orders/positions — do NOT subtract locked from balance.
+     */
+    public record InrWallet(BigDecimal available, BigDecimal locked) {
+        public BigDecimal walletEquity() {
+            BigDecimal a = available == null ? BigDecimal.ZERO : available;
+            BigDecimal l = locked == null ? BigDecimal.ZERO : locked;
+            return a.add(l);
+        }
+    }
+
+    /**
      * INR futures wallet only. No USDT fallback — LIVE margin is INR-only.
      */
     public Mono<WalletBalance> availableFuturesBalance(String apiKey, String apiSecret) {
@@ -376,6 +389,10 @@ public class CoinDcxFuturesClient {
     }
 
     public Mono<BigDecimal> availableInrBalance(String apiKey, String apiSecret) {
+        return inrWallet(apiKey, apiSecret).map(InrWallet::available);
+    }
+
+    public Mono<InrWallet> inrWallet(String apiKey, String apiSecret) {
         ObjectNode body = mapper.createObjectNode();
         body.put("timestamp", System.currentTimeMillis());
         return signedGet("/exchange/v1/derivatives/futures/wallets", body, apiKey, apiSecret)
@@ -383,14 +400,41 @@ public class CoinDcxFuturesClient {
                     if (resp != null && resp.isArray()) {
                         for (JsonNode w : resp) {
                             if (!"INR".equalsIgnoreCase(w.path("currency_short_name").asText())) continue;
-                            BigDecimal bal = new BigDecimal(w.path("balance").asText("0"));
-                            BigDecimal locked = new BigDecimal(w.path("locked_balance").asText("0"));
-                            BigDecimal avail = bal.subtract(locked);
-                            return avail.signum() < 0 ? BigDecimal.ZERO : avail;
+                            BigDecimal available = decimalOrZero(w, "balance");
+                            BigDecimal locked = decimalOrZero(w, "locked_balance");
+                            if (available.signum() < 0) available = BigDecimal.ZERO;
+                            if (locked.signum() < 0) locked = BigDecimal.ZERO;
+                            return new InrWallet(available, locked);
                         }
                     }
-                    return BigDecimal.ZERO;
+                    return new InrWallet(BigDecimal.ZERO, BigDecimal.ZERO);
                 });
+    }
+
+    private static BigDecimal decimalOrZero(JsonNode node, String field) {
+        try {
+            String t = node.path(field).asText("0");
+            if (t == null || t.isBlank()) return BigDecimal.ZERO;
+            return new BigDecimal(t);
+        } catch (Exception e) {
+            return BigDecimal.ZERO;
+        }
+    }
+
+    /**
+     * INR-margined futures PnL: USDT price move × qty × side, converted by USDTINR.
+     * Do not multiply by leverage — leverage only sets margin, not PnL notional.
+     */
+    public static BigDecimal pnlUsdt(BigDecimal entry, BigDecimal markOrExit,
+                                    BigDecimal quantity, String side) {
+        if (entry == null || markOrExit == null || quantity == null) return BigDecimal.ZERO;
+        BigDecimal dir = "SHORT".equalsIgnoreCase(side) ? BigDecimal.valueOf(-1) : BigDecimal.ONE;
+        return markOrExit.subtract(entry).multiply(quantity).multiply(dir);
+    }
+
+    public Mono<BigDecimal> pnlInr(BigDecimal entry, BigDecimal markOrExit,
+                                   BigDecimal quantity, String side) {
+        return usdtInrRate().map(rate -> pnlUsdt(entry, markOrExit, quantity, side).multiply(rate));
     }
 
     /**

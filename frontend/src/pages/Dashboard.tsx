@@ -18,6 +18,8 @@ interface Summary {
 interface Wallet {
   currency: string
   available: number
+  locked?: number
+  walletEquity?: number
   source: string
 }
 
@@ -134,16 +136,33 @@ export default function Dashboard() {
         Paper trading lives on Strategies / Paper Trade. This page never shows paper as account money.
       </Callout>
 
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat
-          label="CoinDCX INR"
+          label="Available"
           value={wallet ? fmtInr(wallet.available, false) : walletErr ? '—' : '…'}
           delay={0}
         />
-        <Stat label="LIVE realized" value={fmtInr(summary?.realizedPnl)} accent={pnlAccent(summary?.realizedPnl)} delay={0.05} />
+        <Stat
+          label="Locked margin"
+          value={wallet?.locked != null ? fmtInr(wallet.locked, false) : '—'}
+          delay={0.03}
+        />
+        <Stat
+          label="Current value"
+          value={
+            wallet
+              ? fmtInr(
+                  (wallet.walletEquity ?? (wallet.available + (wallet.locked ?? 0))) +
+                    (summary?.unrealizedPnl ?? 0),
+                  false,
+                )
+              : '—'
+          }
+          delay={0.05}
+        />
+        <Stat label="LIVE realized" value={fmtInr(summary?.realizedPnl)} accent={pnlAccent(summary?.realizedPnl)} delay={0.08} />
         <Stat label="LIVE unrealized" value={fmtInr(summary?.unrealizedPnl)} accent={pnlAccent(summary?.unrealizedPnl)} delay={0.1} />
         <Stat label="LIVE open" value={summary?.openPositions ?? '—'} delay={0.15} />
-        <Stat label="LIVE win rate" value={summary ? `${(summary.winRate * 100).toFixed(1)}%` : '—'} delay={0.2} />
       </div>
       {walletErr && <p className="mt-2 text-xs text-rose-400">Wallet: {walletErr}</p>}
 

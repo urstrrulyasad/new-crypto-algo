@@ -64,11 +64,13 @@ public class InternalController {
                     String apiKey = crypto.decrypt(key.apiKeyEnc());
                     String apiSecret = crypto.decrypt(key.apiSecretEnc());
                     return Mono.zip(
-                            futures.availableInrBalance(apiKey, apiSecret).defaultIfEmpty(java.math.BigDecimal.ZERO),
-                            futures.listPositions(apiKey, apiSecret, margin).defaultIfEmpty(mapper.createArrayNode())
+                            futures.inrWallet(apiKey, apiSecret),
+                            futures.listPositions(apiKey, apiSecret, margin).defaultIfEmpty(mapper.createArrayNode()),
+                            futures.usdtInrRate().defaultIfEmpty(java.math.BigDecimal.ZERO)
                     ).map(t -> {
                         List<Map<String, Object>> active = new ArrayList<>();
                         JsonNode resp = t.getT2();
+                        java.math.BigDecimal usdtInr = t.getT3();
                         if (resp != null && resp.isArray()) {
                             for (JsonNode p : resp) {
                                 double ap = p.path("active_pos").asDouble(0);
@@ -77,16 +79,27 @@ public class InternalController {
                                 row.put("pair", p.path("pair").asText());
                                 row.put("active_pos", ap);
                                 row.put("avg_price", p.path("avg_price").asDouble(0));
+                                row.put("mark_price", p.path("mark_price").asDouble(0));
                                 row.put("leverage", p.path("leverage").asDouble(0));
-                                row.put("locked_margin", p.path("locked_margin").asText(
+                                row.put("locked_margin_usdt", p.path("locked_margin").asText(
                                         p.path("margin").asText("")));
+                                try {
+                                    java.math.BigDecimal lockedUsdt = new java.math.BigDecimal(
+                                            p.path("locked_margin").asText("0"));
+                                    row.put("locked_margin_inr", lockedUsdt.multiply(usdtInr));
+                                } catch (Exception ignored) {
+                                }
                                 active.add(row);
                             }
                         }
-                        return Map.<String, Object>of(
-                                "availableInr", t.getT1(),
-                                "activeCount", active.size(),
-                                "active", active);
+                        Map<String, Object> out = new LinkedHashMap<>();
+                        out.put("availableInr", t.getT1().available());
+                        out.put("lockedInr", t.getT1().locked());
+                        out.put("walletEquityInr", t.getT1().walletEquity());
+                        out.put("usdtInr", usdtInr);
+                        out.put("activeCount", active.size());
+                        out.put("active", active);
+                        return out;
                     });
                 });
     }

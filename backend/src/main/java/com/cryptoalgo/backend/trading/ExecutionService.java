@@ -274,14 +274,20 @@ public class ExecutionService {
     }
 
     Mono<Void> closePosition(Position pos, BigDecimal exitPrice) {
-        BigDecimal direction = "SHORT".equals(pos.side()) ? BigDecimal.valueOf(-1) : BigDecimal.ONE;
-        BigDecimal pnl = exitPrice.subtract(pos.entryPrice())
-                .multiply(pos.quantity()).multiply(direction).multiply(pos.leverage());
-        Position closed = new Position(pos.id(), pos.tenantId(), pos.userId(), pos.botId(), pos.pair(),
-                pos.side(), pos.quantity(), pos.entryPrice(), exitPrice, pos.leverage(), "CLOSED",
-                pnl, pos.slPrice(), pos.targetPrice(), pos.slOrderId(), pos.marginCurrency(),
-                pos.openedAt(), Instant.now());
-        return positions.save(closed).then();
+        // INR-margined futures: PnL = USDT move × qty × side × USDTINR (no leverage factor).
+        boolean inrMargin = pos.marginCurrency() == null
+                || "INR".equalsIgnoreCase(pos.marginCurrency());
+        Mono<BigDecimal> pnlMono = inrMargin
+                ? futuresClient.pnlInr(pos.entryPrice(), exitPrice, pos.quantity(), pos.side())
+                : Mono.just(CoinDcxFuturesClient.pnlUsdt(
+                        pos.entryPrice(), exitPrice, pos.quantity(), pos.side()));
+        return pnlMono.flatMap(pnl -> {
+            Position closed = new Position(pos.id(), pos.tenantId(), pos.userId(), pos.botId(), pos.pair(),
+                    pos.side(), pos.quantity(), pos.entryPrice(), exitPrice, pos.leverage(), "CLOSED",
+                    pnl, pos.slPrice(), pos.targetPrice(), pos.slOrderId(), pos.marginCurrency(),
+                    pos.openedAt(), Instant.now());
+            return positions.save(closed).then();
+        });
     }
 
     // ------------------------------------------------------------------ live
@@ -399,7 +405,7 @@ public class ExecutionService {
                                                             + " maxLev=" + inst.maxLeverage());
                                         }
 
-                                        // `available` is CoinDCX free INR (balance - locked). Do NOT
+                                        // `available` is CoinDCX free INR wallet balance. Do NOT
                                         // subtract openStake again — that double-counts locked margin.
                                         BigDecimal walletCap = available.multiply(
                                                 BigDecimal.valueOf(props.pipeline().maxWalletPct()));

@@ -93,13 +93,18 @@ public class PortfolioController {
                         .filter(k -> "ACTIVE".equals(k.status()))
                         .next()
                         .switchIfEmpty(Mono.error(ApiException.notFound("No active CoinDCX key")))
-                        .flatMap(key -> futures.availableInrBalance(
+                        .flatMap(key -> futures.inrWallet(
                                         crypto.decrypt(key.apiKeyEnc()),
                                         crypto.decrypt(key.apiSecretEnc()))
-                                .map(bal -> Map.<String, Object>of(
-                                        "currency", "INR",
-                                        "available", bal,
-                                        "source", "CoinDCX futures wallet"))));
+                                .map(w -> {
+                                    Map<String, Object> out = new HashMap<>();
+                                    out.put("currency", "INR");
+                                    out.put("available", w.available());
+                                    out.put("locked", w.locked());
+                                    out.put("walletEquity", w.walletEquity());
+                                    out.put("source", "CoinDCX futures wallet");
+                                    return out;
+                                })));
     }
 
     private Mono<Map<String, Object>> enrichPosition(Position pos) {
@@ -109,13 +114,13 @@ public class PortfolioController {
             return Mono.just(m);
         }
         return futures.lastPrice(pos.pair())
-                .map(mark -> {
-                    BigDecimal u = unrealized(pos, mark);
-                    m.put("markPrice", mark);
-                    m.put("unrealizedPnl", u);
-                    m.put("pnl", u);
-                    return m;
-                })
+                .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side())
+                        .map(u -> {
+                            m.put("markPrice", mark);
+                            m.put("unrealizedPnl", u);
+                            m.put("pnl", u);
+                            return m;
+                        }))
                 .defaultIfEmpty(m);
     }
 
@@ -132,11 +137,12 @@ public class PortfolioController {
                     .findFirst().orElse(null);
             if (open != null) {
                 return futures.lastPrice(open.pair())
-                        .map(mark -> {
-                            m.put("pnl", unrealized(open, mark));
-                            m.put("markPrice", mark);
-                            return m;
-                        })
+                        .flatMap(mark -> futures.pnlInr(open.entryPrice(), mark, open.quantity(), open.side())
+                                .map(u -> {
+                                    m.put("pnl", u);
+                                    m.put("markPrice", mark);
+                                    return m;
+                                }))
                         .defaultIfEmpty(m);
             }
             return Mono.just(m);
@@ -156,12 +162,6 @@ public class PortfolioController {
             }
         }
         return Mono.just(m);
-    }
-
-    private static BigDecimal unrealized(Position pos, BigDecimal mark) {
-        BigDecimal dir = "SHORT".equals(pos.side()) ? BigDecimal.valueOf(-1) : BigDecimal.ONE;
-        BigDecimal lev = pos.leverage() == null ? BigDecimal.ONE : pos.leverage();
-        return mark.subtract(pos.entryPrice()).multiply(pos.quantity()).multiply(dir).multiply(lev);
     }
 
     private static Map<String, Object> positionMap(Position pos) {
@@ -235,7 +235,7 @@ public class PortfolioController {
         return Flux.fromIterable(filtered)
                 .filter(pos -> "OPEN".equals(pos.status()))
                 .concatMap(pos -> futures.lastPrice(pos.pair())
-                        .map(mark -> unrealized(pos, mark))
+                        .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
                         .defaultIfEmpty(BigDecimal.ZERO))
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
                 .map(unrealized -> {
