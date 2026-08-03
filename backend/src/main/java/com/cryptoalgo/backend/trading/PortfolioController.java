@@ -9,7 +9,9 @@ import com.cryptoalgo.backend.repo.BotRepository;
 import com.cryptoalgo.backend.repo.ExchangeKeyRepository;
 import com.cryptoalgo.backend.repo.PositionRepository;
 import com.cryptoalgo.backend.repo.TradeOrderRepository;
+import com.cryptoalgo.backend.security.AuthPrincipal;
 import com.cryptoalgo.backend.security.CurrentUser;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -52,11 +54,18 @@ public class PortfolioController {
 
     @GetMapping("/positions")
     public Flux<Map<String, Object>> positions(@RequestParam(defaultValue = "LIVE") String mode) {
-        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), mode)
-                .flatMapMany(ids -> positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
-                                p.tenantId(), p.userId())
-                        .filter(pos -> ids.contains(pos.botId()))
-                        .concatMap(this::enrichPosition)));
+        String m = normalizeMode(mode);
+        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), m)
+                .flatMapMany(ids -> {
+                    Flux<Position> rows = positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
+                                    p.tenantId(), p.userId())
+                            .filter(pos -> ids.contains(pos.botId()));
+                    if (!"LIVE".equals(m)) {
+                        return rows.concatMap(this::enrichPosition);
+                    }
+                    return liveExchangeByPair(p).flatMapMany(ex ->
+                            rows.concatMap(pos -> enrichLivePosition(pos, ex.get(pos.pair()))));
+                }));
     }
 
     @GetMapping("/orders")
@@ -83,7 +92,9 @@ public class PortfolioController {
                         positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(p.tenantId(), p.userId())
                                 .filter(pos -> ids.contains(pos.botId()))
                                 .collectList()
-                                .flatMap(list -> summarize(list, m))));
+                                .flatMap(list -> "LIVE".equals(m)
+                                        ? liveExchangeByPair(p).flatMap(ex -> summarizeLive(list, ex))
+                                        : summarize(list, m))));
     }
 
     @GetMapping("/wallet")
@@ -105,6 +116,77 @@ public class PortfolioController {
                                     out.put("source", "CoinDCX futures wallet");
                                     return out;
                                 })));
+    }
+
+    private Mono<Map<String, JsonNode>> liveExchangeByPair(AuthPrincipal p) {
+        return keys.findByTenantIdAndUserId(p.tenantId(), p.userId())
+                .filter(k -> "ACTIVE".equals(k.status()))
+                .next()
+                .flatMap(key -> futures.listPositions(
+                                crypto.decrypt(key.apiKeyEnc()),
+                                crypto.decrypt(key.apiSecretEnc()),
+                                "INR")
+                        .map(resp -> {
+                            Map<String, JsonNode> byPair = new HashMap<>();
+                            if (resp != null && resp.isArray()) {
+                                for (JsonNode n : resp) {
+                                    if (n.path("active_pos").asDouble(0) == 0) continue;
+                                    byPair.put(n.path("pair").asText(), n);
+                                }
+                            }
+                            return byPair;
+                        }))
+                .defaultIfEmpty(Map.of());
+    }
+
+    private Mono<Map<String, Object>> enrichLivePosition(Position pos, JsonNode exchange) {
+        if (exchange != null && "OPEN".equals(pos.status())) {
+            Map<String, Object> m = positionMap(pos);
+            return futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO).map(tickerRate -> {
+                BigDecimal settle = settleRate(exchange, tickerRate);
+                BigDecimal u = exchangeUnrealizedInr(exchange, settle);
+                BigDecimal mark = decimal(exchange, "mark_price");
+                BigDecimal lockedUsdt = decimal(exchange, "locked_margin");
+                if (mark != null) m.put("markPrice", mark);
+                if (lockedUsdt != null && settle.signum() > 0) {
+                    m.put("marginInr", lockedUsdt.multiply(settle));
+                    m.put("notionalInr", lockedUsdt.multiply(settle)
+                            .multiply(pos.leverage() == null ? BigDecimal.ONE : pos.leverage()));
+                }
+                m.put("unrealizedPnl", u);
+                m.put("pnl", u);
+                return m;
+            });
+        }
+        return enrichPosition(pos);
+    }
+
+    private static BigDecimal exchangeUnrealizedInr(JsonNode exchange, BigDecimal settle) {
+        BigDecimal avg = decimal(exchange, "avg_price");
+        BigDecimal mark = decimal(exchange, "mark_price");
+        BigDecimal active = decimal(exchange, "active_pos");
+        if (avg == null || mark == null || active == null || settle == null || settle.signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        // active_pos is signed (short negative); CoinDCX INR = USDT move × settle rate
+        return mark.subtract(avg).multiply(active).multiply(settle);
+    }
+
+    private static BigDecimal settleRate(JsonNode exchange, BigDecimal fallbackUsdtInr) {
+        BigDecimal settle = decimal(exchange, "settlement_currency_avg_price");
+        if (settle != null && settle.signum() > 0) return settle;
+        return fallbackUsdtInr == null ? BigDecimal.ZERO : fallbackUsdtInr;
+    }
+
+    private static BigDecimal decimal(JsonNode n, String field) {
+        if (n == null || !n.has(field) || n.get(field).isNull()) return null;
+        String t = n.get(field).asText("");
+        if (t == null || t.isBlank()) return null;
+        try {
+            return new BigDecimal(t);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Mono<Map<String, Object>> enrichPosition(Position pos) {
@@ -214,6 +296,41 @@ public class PortfolioController {
     }
 
     private Mono<Map<String, Object>> summarize(List<Position> filtered, String mode) {
+        Counts c = counts(filtered);
+        return Flux.fromIterable(filtered)
+                .filter(pos -> "OPEN".equals(pos.status()))
+                .concatMap(pos -> futures.lastPrice(pos.pair())
+                        .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
+                        .defaultIfEmpty(BigDecimal.ZERO))
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .map(unrealized -> summaryMap(mode, c, unrealized));
+    }
+
+    private Mono<Map<String, Object>> summarizeLive(List<Position> filtered, Map<String, JsonNode> ex) {
+        Counts c = counts(filtered);
+        return futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO).flatMap(tickerRate -> {
+            BigDecimal unrealized = BigDecimal.ZERO;
+            for (Position pos : filtered) {
+                if (!"OPEN".equals(pos.status())) continue;
+                JsonNode n = ex.get(pos.pair());
+                if (n != null) {
+                    unrealized = unrealized.add(exchangeUnrealizedInr(n, settleRate(n, tickerRate)));
+                }
+            }
+            final BigDecimal fromEx = unrealized;
+            return Flux.fromIterable(filtered)
+                    .filter(pos -> "OPEN".equals(pos.status()) && !ex.containsKey(pos.pair()))
+                    .concatMap(pos -> futures.lastPrice(pos.pair())
+                            .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
+                            .defaultIfEmpty(BigDecimal.ZERO))
+                    .reduce(fromEx, BigDecimal::add)
+                    .map(u -> summaryMap("LIVE", c, u));
+        });
+    }
+
+    private record Counts(BigDecimal realized, int open, int closed, int wins) {}
+
+    private static Counts counts(List<Position> filtered) {
         BigDecimal realized = BigDecimal.ZERO;
         int open = 0, closed = 0, wins = 0;
         for (Position pos : filtered) {
@@ -227,26 +344,17 @@ public class PortfolioController {
                 open++;
             }
         }
-        BigDecimal realizedFinal = realized;
-        int closedFinal = closed;
-        int winsFinal = wins;
-        int openFinal = open;
+        return new Counts(realized, open, closed, wins);
+    }
 
-        return Flux.fromIterable(filtered)
-                .filter(pos -> "OPEN".equals(pos.status()))
-                .concatMap(pos -> futures.lastPrice(pos.pair())
-                        .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
-                        .defaultIfEmpty(BigDecimal.ZERO))
-                .reduce(BigDecimal.ZERO, BigDecimal::add)
-                .map(unrealized -> {
-                    Map<String, Object> out = new HashMap<>();
-                    out.put("mode", mode);
-                    out.put("openPositions", openFinal);
-                    out.put("closedPositions", closedFinal);
-                    out.put("realizedPnl", realizedFinal);
-                    out.put("unrealizedPnl", unrealized);
-                    out.put("winRate", closedFinal == 0 ? 0.0 : (double) winsFinal / closedFinal);
-                    return out;
-                });
+    private static Map<String, Object> summaryMap(String mode, Counts c, BigDecimal unrealized) {
+        Map<String, Object> out = new HashMap<>();
+        out.put("mode", mode);
+        out.put("openPositions", c.open());
+        out.put("closedPositions", c.closed());
+        out.put("realizedPnl", c.realized());
+        out.put("unrealizedPnl", unrealized);
+        out.put("winRate", c.closed() == 0 ? 0.0 : (double) c.wins() / c.closed());
+        return out;
     }
 }

@@ -81,12 +81,28 @@ public class InternalController {
                                 row.put("avg_price", p.path("avg_price").asDouble(0));
                                 row.put("mark_price", p.path("mark_price").asDouble(0));
                                 row.put("leverage", p.path("leverage").asDouble(0));
+                                row.put("settlement_currency_avg_price",
+                                        p.path("settlement_currency_avg_price").asText(""));
                                 row.put("locked_margin_usdt", p.path("locked_margin").asText(
                                         p.path("margin").asText("")));
                                 try {
                                     java.math.BigDecimal lockedUsdt = new java.math.BigDecimal(
                                             p.path("locked_margin").asText("0"));
-                                    row.put("locked_margin_inr", lockedUsdt.multiply(usdtInr));
+                                    java.math.BigDecimal settle = usdtInr;
+                                    String settleTxt = p.path("settlement_currency_avg_price").asText("");
+                                    if (settleTxt != null && !settleTxt.isBlank()) {
+                                        settle = new java.math.BigDecimal(settleTxt);
+                                    }
+                                    row.put("locked_margin_inr", lockedUsdt.multiply(settle));
+                                    java.math.BigDecimal avg = new java.math.BigDecimal(
+                                            p.path("avg_price").asText("0"));
+                                    java.math.BigDecimal mark = new java.math.BigDecimal(
+                                            p.path("mark_price").asText(
+                                                    p.path("avg_price").asText("0")));
+                                    java.math.BigDecimal qty = java.math.BigDecimal.valueOf(ap);
+                                    // active_pos is signed (neg=short); PnL USDT × settle → INR
+                                    row.put("unrealized_pnl_inr",
+                                            mark.subtract(avg).multiply(qty).multiply(settle));
                                 } catch (Exception ignored) {
                                 }
                                 active.add(row);
