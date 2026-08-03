@@ -157,34 +157,62 @@ public class PortfolioController {
     private Mono<Map<String, Object>> enrichLivePosition(Position pos, JsonNode exchange) {
         if (exchange != null && "OPEN".equals(pos.status())) {
             Map<String, Object> m = positionMap(pos);
-            return futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO).map(tickerRate -> {
-                BigDecimal settle = settleRate(exchange, tickerRate);
-                BigDecimal u = exchangeUnrealizedInr(exchange, settle);
-                BigDecimal mark = decimal(exchange, "mark_price");
-                BigDecimal lockedUsdt = decimal(exchange, "locked_margin");
-                if (mark != null) m.put("markPrice", mark);
-                if (lockedUsdt != null && settle.signum() > 0) {
-                    m.put("marginInr", lockedUsdt.multiply(settle));
-                    m.put("notionalInr", lockedUsdt.multiply(settle)
-                            .multiply(pos.leverage() == null ? BigDecimal.ONE : pos.leverage()));
-                }
-                m.put("unrealizedPnl", u);
-                m.put("pnl", u);
-                return m;
-            });
+            // CoinDCX UI mark moves live; positions API mark_price is often stale (= avg).
+            // Prefer fresh futures candle close, fall back to exchange mark.
+            return Mono.zip(
+                            futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO),
+                            futures.lastPrice(pos.pair()).defaultIfEmpty(BigDecimal.ZERO)
+                    )
+                    .map(t -> {
+                        BigDecimal settle = settleRate(exchange, t.getT1());
+                        BigDecimal liveMark = t.getT2().signum() > 0 ? t.getT2() : decimal(exchange, "mark_price");
+                        BigDecimal avg = decimal(exchange, "avg_price");
+                        if (avg == null) avg = pos.entryPrice();
+                        BigDecimal active = decimal(exchange, "active_pos");
+                        if (active == null) {
+                            BigDecimal q = pos.quantity() == null ? BigDecimal.ZERO : pos.quantity();
+                            active = "SHORT".equalsIgnoreCase(pos.side()) ? q.negate() : q;
+                        }
+                        BigDecimal u = unrealizedInr(avg, liveMark, active, settle);
+                        BigDecimal lockedUsdt = decimal(exchange, "locked_margin");
+                        BigDecimal marginInr = null;
+                        if (lockedUsdt != null && settle.signum() > 0) {
+                            marginInr = lockedUsdt.multiply(settle);
+                            m.put("marginInr", marginInr);
+                        }
+                        if (liveMark != null && liveMark.signum() > 0 && settle.signum() > 0) {
+                            m.put("markPrice", liveMark);
+                            m.put("sizeInr", active.abs().multiply(liveMark).multiply(settle));
+                        }
+                        if (avg != null) m.put("entryPrice", avg);
+                        m.put("unrealizedPnl", u);
+                        m.put("pnl", u);
+                        if (marginInr != null && marginInr.signum() > 0) {
+                            m.put("roePct", u.multiply(BigDecimal.valueOf(100))
+                                    .divide(marginInr, 4, java.math.RoundingMode.HALF_UP));
+                        }
+                        return m;
+                    });
         }
         return enrichPosition(pos);
     }
 
-    private static BigDecimal exchangeUnrealizedInr(JsonNode exchange, BigDecimal settle) {
-        BigDecimal avg = decimal(exchange, "avg_price");
-        BigDecimal mark = decimal(exchange, "mark_price");
-        BigDecimal active = decimal(exchange, "active_pos");
-        if (avg == null || mark == null || active == null || settle == null || settle.signum() <= 0) {
+    private static BigDecimal unrealizedInr(BigDecimal avg, BigDecimal mark,
+                                            BigDecimal activePos, BigDecimal settle) {
+        if (avg == null || mark == null || activePos == null
+                || settle == null || settle.signum() <= 0) {
             return BigDecimal.ZERO;
         }
         // active_pos is signed (short negative); CoinDCX INR = USDT move × settle rate
-        return mark.subtract(avg).multiply(active).multiply(settle);
+        return mark.subtract(avg).multiply(activePos).multiply(settle);
+    }
+
+    private static BigDecimal exchangeUnrealizedInr(JsonNode exchange, BigDecimal settle) {
+        return unrealizedInr(
+                decimal(exchange, "avg_price"),
+                decimal(exchange, "mark_price"),
+                decimal(exchange, "active_pos"),
+                settle);
     }
 
     private static BigDecimal settleRate(JsonNode exchange, BigDecimal fallbackUsdtInr) {
@@ -338,24 +366,28 @@ public class PortfolioController {
 
     private Mono<Map<String, Object>> summarizeLive(List<Position> filtered, Map<String, JsonNode> ex) {
         Counts c = counts(filtered);
-        return futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO).flatMap(tickerRate -> {
-            BigDecimal unrealized = BigDecimal.ZERO;
-            for (Position pos : filtered) {
-                if (!"OPEN".equals(pos.status())) continue;
-                JsonNode n = ex.get(pos.pair());
-                if (n != null) {
-                    unrealized = unrealized.add(exchangeUnrealizedInr(n, settleRate(n, tickerRate)));
-                }
-            }
-            final BigDecimal fromEx = unrealized;
-            return Flux.fromIterable(filtered)
-                    .filter(pos -> "OPEN".equals(pos.status()) && !ex.containsKey(pos.pair()))
-                    .concatMap(pos -> futures.lastPrice(pos.pair())
-                            .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
-                            .defaultIfEmpty(BigDecimal.ZERO))
-                    .reduce(fromEx, BigDecimal::add)
-                    .map(u -> summaryMap("LIVE", c, u));
-        });
+        return futures.usdtInrRate().defaultIfEmpty(BigDecimal.ZERO).flatMap(tickerRate ->
+                Flux.fromIterable(filtered)
+                        .filter(pos -> "OPEN".equals(pos.status()))
+                        .concatMap(pos -> {
+                            JsonNode n = ex.get(pos.pair());
+                            BigDecimal settle = n != null ? settleRate(n, tickerRate) : tickerRate;
+                            BigDecimal avg = n != null ? decimal(n, "avg_price") : pos.entryPrice();
+                            BigDecimal active = n != null ? decimal(n, "active_pos") : null;
+                            if (active == null) {
+                                BigDecimal q = pos.quantity() == null ? BigDecimal.ZERO : pos.quantity();
+                                active = "SHORT".equalsIgnoreCase(pos.side()) ? q.negate() : q;
+                            }
+                            BigDecimal activeFinal = active;
+                            BigDecimal avgFinal = avg;
+                            BigDecimal exMark = n != null ? decimal(n, "mark_price") : null;
+                            return futures.lastPrice(pos.pair())
+                                    .switchIfEmpty(Mono.just(exMark != null ? exMark : BigDecimal.ZERO))
+                                    .map(mark -> unrealizedInr(avgFinal, mark, activeFinal, settle))
+                                    .defaultIfEmpty(BigDecimal.ZERO);
+                        })
+                        .reduce(BigDecimal.ZERO, BigDecimal::add)
+                        .map(u -> summaryMap("LIVE", c, u)));
     }
 
     private record Counts(BigDecimal realized, int open, int closed, int wins) {}

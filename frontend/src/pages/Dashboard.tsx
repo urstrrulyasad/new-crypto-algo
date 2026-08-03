@@ -35,6 +35,9 @@ interface Position {
   unrealizedPnl?: number | null
   pnl?: number | null
   markPrice?: number | null
+  marginInr?: number | null
+  sizeInr?: number | null
+  roePct?: number | null
   slPrice?: number | null
   targetPrice?: number | null
   marginCurrency?: string
@@ -95,11 +98,15 @@ export default function Dashboard() {
       .catch(() => setOrders([]))
   }
 
+  const openLive = (positions ?? []).filter((p) => p.status === 'OPEN').length
+
   useEffect(() => {
     load()
-    const poll = setInterval(load, 12_000)
+    // Match CoinDCX “live” feel while positions are open; slower when flat.
+    const ms = openLive > 0 ? 2_000 : 12_000
+    const poll = setInterval(load, ms)
     return () => clearInterval(poll)
-  }, [])
+  }, [openLive])
 
   async function stopAll() {
     if (!confirm('Stop all running futures bots for this tenant?')) return
@@ -203,22 +210,26 @@ export default function Dashboard() {
                 ))}
               </div>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[720px] text-left text-sm">
+                <table className="w-full min-w-[920px] text-left text-sm">
                   <thead>
                     <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
                       <th className="pb-2 pr-4">Instrument</th>
                       <th className="pb-2 pr-4">Side</th>
-                      <th className="pb-2 pr-4">Qty</th>
+                      <th className="pb-2 pr-4">Margin</th>
+                      <th className="pb-2 pr-4">Size</th>
                       <th className="pb-2 pr-4">Entry</th>
-                      <th className="pb-2 pr-4">Exit</th>
+                      <th className="pb-2 pr-4">Mark</th>
                       <th className="pb-2 pr-4">Status</th>
-                      <th className="pb-2 pr-4">PnL</th>
-                      <th className="pb-2 pr-4">Opened</th>
-                      <th className="pb-2">Closed</th>
+                      <th className="pb-2 pr-4">Active PnL</th>
+                      <th className="pb-2 pr-4">ROE</th>
+                      <th className="pb-2">Time</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.slice(0, 30).map((p, i) => (
+                    {positions.slice(0, 30).map((p, i) => {
+                      const livePnl =
+                        p.status === 'CLOSED' ? p.realizedPnl : (p.pnl ?? p.unrealizedPnl ?? null)
+                      return (
                       <motion.tr
                         key={p.id}
                         initial={{ opacity: 0, x: -6 }}
@@ -235,35 +246,45 @@ export default function Dashboard() {
                         <td className="py-2.5 pr-4">
                           <Badge tone={p.side === 'LONG' ? 'success' : 'danger'}>{p.side}</Badge>
                         </td>
-                        <td className="py-2.5 pr-4">{p.quantity}</td>
-                        <td className="py-2.5 pr-4">₹{Number(p.entryPrice).toLocaleString()}</td>
                         <td className="py-2.5 pr-4">
-                          {p.exitPrice != null ? `₹${Number(p.exitPrice).toLocaleString()}` : '—'}
+                          {p.marginInr != null ? fmtInr(p.marginInr, false) : '—'}
+                        </td>
+                        <td className="py-2.5 pr-4">
+                          {p.sizeInr != null
+                            ? fmtInr(p.sizeInr, false)
+                            : p.exitPrice != null
+                              ? `₹${Number(p.exitPrice).toLocaleString()}`
+                              : p.quantity}
+                        </td>
+                        <td className="py-2.5 pr-4">{Number(p.entryPrice)}</td>
+                        <td className="py-2.5 pr-4">
+                          {p.status === 'OPEN' && p.markPrice != null ? Number(p.markPrice) : '—'}
                         </td>
                         <td className="py-2.5 pr-4">
                           <Badge tone={p.status === 'OPEN' ? 'info' : 'default'}>{p.status}</Badge>
                         </td>
                         <td
                           className={`py-2.5 pr-4 ${
-                            Number(p.status === 'CLOSED' ? p.realizedPnl : (p.pnl ?? p.unrealizedPnl) ?? 0) >= 0
-                              ? 'text-emerald-400'
-                              : 'text-rose-400'
+                            Number(livePnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                           }`}
                         >
-                          {p.status === 'CLOSED'
-                            ? fmtInr(p.realizedPnl)
-                            : p.pnl != null || p.unrealizedPnl != null
-                              ? fmtInr(p.pnl ?? p.unrealizedPnl)
-                              : '—'}
+                          {livePnl != null ? fmtInr(livePnl) : '—'}
                         </td>
-                        <td className="whitespace-nowrap py-2.5 pr-4 text-xs text-slate-500">
-                          {formatDateTime(p.openedAt)}
+                        <td
+                          className={`py-2.5 pr-4 ${
+                            Number(p.roePct ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          {p.status === 'OPEN' && p.roePct != null
+                            ? `${p.roePct >= 0 ? '+' : ''}${Number(p.roePct).toFixed(2)}%`
+                            : '—'}
                         </td>
                         <td className="whitespace-nowrap py-2.5 text-xs text-slate-500">
-                          {formatDateTime(p.closedAt)}
+                          {formatDateTime(p.status === 'CLOSED' ? p.closedAt : p.openedAt)}
                         </td>
                       </motion.tr>
-                    ))}
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
