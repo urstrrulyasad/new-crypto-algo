@@ -112,6 +112,14 @@ public class PortfolioController {
                                         : summarize(list, m))));
     }
 
+    /**
+     * CoinDCX-aligned futures wallet snapshot.
+     * <ul>
+     *   <li>Docs: walletBalance = balance + locked_balance</li>
+     *   <li>UI Current Value (INR) = walletBalance + activePnl</li>
+     *   <li>UI Est. total Futures = INR currentValue + USDT futures valued in INR</li>
+     * </ul>
+     */
     @GetMapping("/wallet")
     public Mono<Map<String, Object>> wallet() {
         return CurrentUser.get().flatMap(p ->
@@ -119,18 +127,77 @@ public class PortfolioController {
                         .filter(k -> "ACTIVE".equals(k.status()))
                         .next()
                         .switchIfEmpty(Mono.error(ApiException.notFound("No active CoinDCX key")))
-                        .flatMap(key -> futures.inrWallet(
-                                        crypto.decrypt(key.apiKeyEnc()),
-                                        crypto.decrypt(key.apiSecretEnc()))
-                                .map(w -> {
-                                    Map<String, Object> out = new HashMap<>();
-                                    out.put("currency", "INR");
-                                    out.put("available", w.available());
-                                    out.put("locked", w.locked());
-                                    out.put("walletEquity", w.walletEquity());
-                                    out.put("source", "CoinDCX futures wallet");
-                                    return out;
-                                })));
+                        .flatMap(key -> {
+                            String apiKey = crypto.decrypt(key.apiKeyEnc());
+                            String apiSecret = crypto.decrypt(key.apiSecretEnc());
+                            return Mono.zip(
+                                            futures.futuresWallets(apiKey, apiSecret),
+                                            futures.usdtInrRate().defaultIfEmpty(BigDecimal.valueOf(100)),
+                                            liveActivePnlInr(p)
+                                    )
+                                    .map(t -> {
+                                        BigDecimal availInr = BigDecimal.ZERO;
+                                        BigDecimal lockedInr = BigDecimal.ZERO;
+                                        BigDecimal availUsdt = BigDecimal.ZERO;
+                                        BigDecimal lockedUsdt = BigDecimal.ZERO;
+                                        for (CoinDcxFuturesClient.CurrencyWallet w : t.getT1()) {
+                                            if ("INR".equalsIgnoreCase(w.currency())) {
+                                                availInr = w.available();
+                                                lockedInr = w.locked();
+                                            } else if ("USDT".equalsIgnoreCase(w.currency())) {
+                                                availUsdt = w.available();
+                                                lockedUsdt = w.locked();
+                                            }
+                                        }
+                                        BigDecimal usdtInr = t.getT2();
+                                        BigDecimal activePnl = t.getT3();
+                                        BigDecimal walletBalanceInr = availInr.add(lockedInr);
+                                        BigDecimal walletBalanceUsdt = availUsdt.add(lockedUsdt);
+                                        BigDecimal usdtValueInr = walletBalanceUsdt.multiply(usdtInr);
+                                        // CoinDCX Assets row: Current Value = Wallet Balance + Active PNL
+                                        BigDecimal currentValueInr = walletBalanceInr.add(activePnl);
+                                        // CoinDCX Futures header: Est. total = sum of currency current values
+                                        BigDecimal estTotalFutures = currentValueInr.add(usdtValueInr);
+                                        BigDecimal futuresWalletBalance =
+                                                walletBalanceInr.add(usdtValueInr);
+
+                                        Map<String, Object> out = new HashMap<>();
+                                        out.put("currency", "INR");
+                                        out.put("available", availInr);
+                                        out.put("locked", lockedInr);
+                                        out.put("walletBalance", walletBalanceInr);
+                                        out.put("walletEquity", walletBalanceInr); // back-compat
+                                        out.put("activePnl", activePnl);
+                                        out.put("currentValue", currentValueInr);
+                                        out.put("usdtAvailable", availUsdt);
+                                        out.put("usdtLocked", lockedUsdt);
+                                        out.put("usdtWalletBalance", walletBalanceUsdt);
+                                        out.put("usdtValueInr", usdtValueInr);
+                                        out.put("usdtInrRate", usdtInr);
+                                        out.put("futuresWalletBalance", futuresWalletBalance);
+                                        out.put("estTotalFutures", estTotalFutures);
+                                        out.put("source", "CoinDCX futures wallets");
+                                        return out;
+                                    });
+                        }));
+    }
+
+    /** Live Active PNL in INR for open LIVE positions (candle mark × settle). */
+    private Mono<BigDecimal> liveActivePnlInr(AuthPrincipal p) {
+        return botIds(p.tenantId(), p.userId(), "LIVE").flatMap(ids ->
+                positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(p.tenantId(), p.userId())
+                        .filter(pos -> ids.contains(pos.botId()) && "OPEN".equals(pos.status()))
+                        .collectList()
+                        .flatMap(list -> {
+                            if (list.isEmpty()) return Mono.just(BigDecimal.ZERO);
+                            return liveExchangeByPair(p).flatMap(ex -> summarizeLive(list, ex)
+                                    .map(m -> {
+                                        Object u = m.get("unrealizedPnl");
+                                        if (u instanceof BigDecimal bd) return bd;
+                                        if (u instanceof Number n) return BigDecimal.valueOf(n.doubleValue());
+                                        return BigDecimal.ZERO;
+                                    }));
+                        }));
     }
 
     private Mono<Map<String, JsonNode>> liveExchangeByPair(AuthPrincipal p) {

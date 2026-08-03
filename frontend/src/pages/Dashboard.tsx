@@ -19,7 +19,17 @@ interface Wallet {
   currency: string
   available: number
   locked?: number
+  /** Docs: balance + locked_balance */
+  walletBalance?: number
   walletEquity?: number
+  /** Wallet balance + active PnL (CoinDCX INR Current Value) */
+  currentValue?: number
+  activePnl?: number
+  usdtAvailable?: number
+  usdtValueInr?: number
+  /** INR current + USDT futures in INR (CoinDCX Est. total Futures) */
+  estTotalFutures?: number
+  futuresWalletBalance?: number
   source: string
 }
 
@@ -154,27 +164,59 @@ export default function Dashboard() {
           delay={0}
         />
         <Stat
-          label="Locked margin"
+          label="Locked"
           value={wallet?.locked != null ? fmtInr(wallet.locked, false) : '—'}
           delay={0.03}
         />
         <Stat
-          label="Current value"
+          label="Wallet balance"
           value={
             wallet
-              ? fmtInr(
-                  (wallet.walletEquity ?? (wallet.available + (wallet.locked ?? 0))) +
-                    (summary?.unrealizedPnl ?? 0),
-                  false,
-                )
+              ? fmtInr(wallet.walletBalance ?? wallet.walletEquity ?? wallet.available + (wallet.locked ?? 0), false)
               : '—'
           }
           delay={0.05}
         />
-        <Stat label="LIVE realized" value={fmtInr(summary?.realizedPnl)} accent={pnlAccent(summary?.realizedPnl)} delay={0.08} />
-        <Stat label="LIVE unrealized" value={fmtInr(summary?.unrealizedPnl)} accent={pnlAccent(summary?.unrealizedPnl)} delay={0.1} />
-        <Stat label="LIVE open" value={summary?.openPositions ?? '—'} delay={0.15} />
+        <Stat
+          label="Active PnL"
+          value={fmtInr(wallet?.activePnl ?? summary?.unrealizedPnl)}
+          accent={pnlAccent(wallet?.activePnl ?? summary?.unrealizedPnl)}
+          delay={0.08}
+        />
+        <Stat
+          label="Current value"
+          value={
+            wallet?.currentValue != null
+              ? fmtInr(wallet.currentValue, false)
+              : wallet
+                ? fmtInr(
+                    (wallet.walletBalance ?? wallet.walletEquity ?? wallet.available + (wallet.locked ?? 0)) +
+                      (summary?.unrealizedPnl ?? 0),
+                    false,
+                  )
+                : '—'
+          }
+          delay={0.1}
+        />
+        <Stat
+          label="Est. futures total"
+          value={
+            wallet?.estTotalFutures != null
+              ? fmtInr(wallet.estTotalFutures, false)
+              : wallet?.currentValue != null
+                ? fmtInr(wallet.currentValue + (wallet.usdtValueInr ?? 0), false)
+                : '—'
+          }
+          delay={0.12}
+        />
       </div>
+      {wallet?.usdtValueInr != null && wallet.usdtValueInr > 0 && (
+        <p className="mt-2 text-xs text-slate-500">
+          Includes USDT futures {fmtInr(wallet.usdtValueInr, false)}
+          {wallet.usdtAvailable != null ? ` (${wallet.usdtAvailable} USDT)` : ''} · CoinDCX Est. total =
+          INR current + USDT
+        </p>
+      )}
       {walletErr && <p className="mt-2 text-xs text-rose-400">Wallet: {walletErr}</p>}
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">

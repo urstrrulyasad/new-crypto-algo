@@ -368,20 +368,28 @@ public class CoinDcxFuturesClient {
     public record WalletBalance(String currency, BigDecimal available) {}
 
     /**
-     * CoinDCX futures INR wallet fields.
-     * Docs/socket: {@code balance} is already usable/available; {@code locked_balance}
-     * is margin locked in open orders/positions — do NOT subtract locked from balance.
+     * CoinDCX futures wallet row.
+     * Docs ({@code GET /exchange/v1/derivatives/futures/wallets}):
+     * {@code balance} = available/usable; {@code locked_balance} = margin in orders/positions.
+     * <p>Total wallet balance = balance + locked_balance (per CoinDCX note).
      */
-    public record InrWallet(BigDecimal available, BigDecimal locked) {
-        public BigDecimal walletEquity() {
+    public record CurrencyWallet(String currency, BigDecimal available, BigDecimal locked) {
+        public BigDecimal walletBalance() {
             BigDecimal a = available == null ? BigDecimal.ZERO : available;
             BigDecimal l = locked == null ? BigDecimal.ZERO : locked;
             return a.add(l);
         }
     }
 
+    /** @deprecated use {@link CurrencyWallet}; kept for call sites that only need INR available. */
+    public record InrWallet(BigDecimal available, BigDecimal locked) {
+        public BigDecimal walletEquity() {
+            return new CurrencyWallet("INR", available, locked).walletBalance();
+        }
+    }
+
     /**
-     * INR futures wallet only. No USDT fallback — LIVE margin is INR-only.
+     * INR futures wallet only. No USDT fallback — LIVE margin is INR-only for sizing.
      */
     public Mono<WalletBalance> availableFuturesBalance(String apiKey, String apiSecret) {
         return availableInrBalance(apiKey, apiSecret)
@@ -393,21 +401,35 @@ public class CoinDcxFuturesClient {
     }
 
     public Mono<InrWallet> inrWallet(String apiKey, String apiSecret) {
+        return futuresWallets(apiKey, apiSecret).map(list -> {
+            for (CurrencyWallet w : list) {
+                if ("INR".equalsIgnoreCase(w.currency())) {
+                    return new InrWallet(w.available(), w.locked());
+                }
+            }
+            return new InrWallet(BigDecimal.ZERO, BigDecimal.ZERO);
+        });
+    }
+
+    /** All futures wallets (INR + USDT). Docs: same endpoint returns both. */
+    public Mono<java.util.List<CurrencyWallet>> futuresWallets(String apiKey, String apiSecret) {
         ObjectNode body = mapper.createObjectNode();
         body.put("timestamp", System.currentTimeMillis());
         return signedGet("/exchange/v1/derivatives/futures/wallets", body, apiKey, apiSecret)
                 .map(resp -> {
+                    java.util.List<CurrencyWallet> out = new java.util.ArrayList<>();
                     if (resp != null && resp.isArray()) {
                         for (JsonNode w : resp) {
-                            if (!"INR".equalsIgnoreCase(w.path("currency_short_name").asText())) continue;
+                            String ccy = w.path("currency_short_name").asText("");
+                            if (ccy.isBlank()) continue;
                             BigDecimal available = decimalOrZero(w, "balance");
                             BigDecimal locked = decimalOrZero(w, "locked_balance");
                             if (available.signum() < 0) available = BigDecimal.ZERO;
                             if (locked.signum() < 0) locked = BigDecimal.ZERO;
-                            return new InrWallet(available, locked);
+                            out.add(new CurrencyWallet(ccy.toUpperCase(), available, locked));
                         }
                     }
-                    return new InrWallet(BigDecimal.ZERO, BigDecimal.ZERO);
+                    return out;
                 });
     }
 
