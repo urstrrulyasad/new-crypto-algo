@@ -49,6 +49,10 @@ interface Order {
   status: string
   price: number
   quantity: number
+  avgPrice?: number | null
+  sizeInr?: number | null
+  feeInr?: number | null
+  settleRate?: number | null
   mode: string
   error?: string | null
   createdAt: string
@@ -314,9 +318,13 @@ export default function Dashboard() {
                     tone={isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'}
                     detail={
                       o.error ||
-                      (o.pnl != null
-                        ? `PnL ${fmtInr(o.pnl)} · ₹${Number(o.price).toLocaleString()}`
-                        : `₹${Number(o.price).toLocaleString()}`)
+                      [
+                        o.sizeInr != null ? `Size ${fmtInr(o.sizeInr, false)}` : null,
+                        o.avgPrice != null ? `Avg ${o.avgPrice}` : null,
+                        o.pnl != null ? `PnL ${fmtInr(o.pnl)}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
                     }
                     onClick={() =>
                       navigate(`/futures/chart/${encodeURIComponent(o.pair)}?mode=live&timeframe=5m`)
@@ -325,15 +333,16 @@ export default function Dashboard() {
                 ))}
               </div>
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[760px] text-left text-sm">
+                <table className="w-full min-w-[860px] text-left text-sm">
                   <thead>
                     <tr className="border-b border-edge text-xs uppercase tracking-wider text-slate-500">
                       <th className="pb-2 pr-4">Instrument</th>
                       <th className="pb-2 pr-4">Side</th>
                       <th className="pb-2 pr-4">Status</th>
+                      <th className="pb-2 pr-4">Avg fill</th>
+                      <th className="pb-2 pr-4">Size (INR)</th>
                       <th className="pb-2 pr-4">Qty</th>
                       <th className="pb-2 pr-4">PnL</th>
-                      <th className="pb-2 pr-4">Detail</th>
                       <th className="pb-2">Order time</th>
                     </tr>
                   </thead>
@@ -360,19 +369,17 @@ export default function Dashboard() {
                             {o.status}
                           </Badge>
                         </td>
-                        <td className="py-2.5 pr-4">{o.quantity}</td>
+                        <td className="py-2.5 pr-4">{o.avgPrice ?? o.price ?? '—'}</td>
+                        <td className="py-2.5 pr-4">
+                          {o.sizeInr != null ? fmtInr(o.sizeInr, false) : '—'}
+                        </td>
+                        <td className="py-2.5 pr-4 text-slate-500">{o.quantity}</td>
                         <td
                           className={`py-2.5 pr-4 ${
                             o.pnl == null ? 'text-slate-500' : o.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'
                           }`}
                         >
                           {o.pnl != null ? fmtInr(o.pnl) : '—'}
-                        </td>
-                        <td
-                          className="max-w-[240px] truncate py-2.5 pr-4 text-xs text-slate-500"
-                          title={o.error ?? ''}
-                        >
-                          {o.error || `₹${Number(o.price).toLocaleString()}`}
                         </td>
                         <td className="whitespace-nowrap py-2.5 text-xs text-slate-300">
                           {formatDateTime(o.createdAt)}

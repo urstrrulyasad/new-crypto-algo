@@ -70,7 +70,8 @@ public class PortfolioController {
 
     @GetMapping("/orders")
     public Flux<Map<String, Object>> orders(@RequestParam(defaultValue = "LIVE") String mode) {
-        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), mode)
+        String m = normalizeMode(mode);
+        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), m)
                 .flatMapMany(ids -> Mono.zip(
                                 orders.findByTenantIdAndUserIdOrderByCreatedAtDesc(
                                                 p.tenantId(), p.userId())
@@ -79,9 +80,23 @@ public class PortfolioController {
                                 positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
                                                 p.tenantId(), p.userId())
                                         .filter(pos -> ids.contains(pos.botId()))
-                                        .collectList()
+                                        .collectList(),
+                                settleRateForDisplay(p, m)
                         ).flatMapMany(t -> Flux.fromIterable(t.getT1())
-                                .concatMap(o -> enrichOrder(o, t.getT2())))));
+                                .concatMap(o -> enrichOrder(o, t.getT2(), t.getT3())))));
+    }
+
+    /** CoinDCX INR order size uses settlement rate (~102), not spot USDTINR ticker. */
+    private Mono<BigDecimal> settleRateForDisplay(AuthPrincipal p, String mode) {
+        Mono<BigDecimal> ticker = futures.usdtInrRate().defaultIfEmpty(BigDecimal.valueOf(100));
+        if (!"LIVE".equals(mode)) return ticker;
+        return liveExchangeByPair(p).flatMap(ex -> ticker.map(rate -> {
+            for (JsonNode n : ex.values()) {
+                BigDecimal s = settleRate(n, rate);
+                if (s != null && s.signum() > 0) return s;
+            }
+            return rate;
+        }));
     }
 
     @GetMapping("/summary")
@@ -206,8 +221,21 @@ public class PortfolioController {
                 .defaultIfEmpty(m);
     }
 
-    private Mono<Map<String, Object>> enrichOrder(TradeOrder o, List<Position> allPos) {
+    private Mono<Map<String, Object>> enrichOrder(TradeOrder o, List<Position> allPos, BigDecimal settle) {
         Map<String, Object> m = orderMap(o);
+        BigDecimal fill = o.avgPrice() != null && o.avgPrice().signum() > 0 ? o.avgPrice() : o.price();
+        BigDecimal qty = o.quantity() == null ? BigDecimal.ZERO : o.quantity();
+        BigDecimal s = settle == null || settle.signum() <= 0 ? BigDecimal.valueOf(100) : settle;
+        if (fill != null && fill.signum() > 0 && qty.signum() > 0) {
+            // CoinDCX Futures History "Filled / Size" INR = qty × avg × settlement_rate
+            m.put("sizeInr", qty.multiply(fill).multiply(s));
+            m.put("avgPrice", fill);
+            m.put("settleRate", s);
+        }
+        if (o.fee() != null && o.fee().signum() != 0) {
+            // Stored fee is USDT notionals for INR-M; convert like CoinDCX transaction fees.
+            m.put("feeInr", o.fee().multiply(s).negate());
+        }
         boolean entryLike = "BUY".equalsIgnoreCase(o.side()) || "LONG".equalsIgnoreCase(o.side());
         boolean openish = "OPEN".equals(o.status()) || "SUBMITTING".equals(o.status())
                 || "PENDING_RECONCILE".equals(o.status());
@@ -229,18 +257,20 @@ public class PortfolioController {
             }
             return Mono.just(m);
         }
-        if ("FILLED".equals(o.status()) || "OPEN".equals(o.status())) {
-            // Prefer closed position realized PnL for same bot/pair near this order.
+        if ("FILLED".equals(o.status())) {
+            // Attach round-trip realized only on the exit leg (SELL for long / BUY for short).
             Position closed = allPos.stream()
                     .filter(p -> "CLOSED".equals(p.status())
                             && p.botId().equals(o.botId())
                             && p.pair().equals(o.pair())
-                            && p.realizedPnl() != null)
+                            && p.realizedPnl() != null
+                            && p.closedAt() != null
+                            && Math.abs(java.time.Duration.between(p.closedAt(), o.createdAt()).toSeconds()) < 120)
                     .findFirst().orElse(null);
-            if (closed != null && !entryLike) {
-                m.put("pnl", closed.realizedPnl());
-            } else if (closed != null && "FILLED".equals(o.status())) {
-                m.put("pnl", closed.realizedPnl());
+            if (closed != null) {
+                boolean exitLeg = ("LONG".equals(closed.side()) && !entryLike)
+                        || ("SHORT".equals(closed.side()) && entryLike);
+                if (exitLeg) m.put("pnl", closed.realizedPnl());
             }
         }
         return Mono.just(m);
