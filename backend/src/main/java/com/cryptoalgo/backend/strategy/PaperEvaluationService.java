@@ -82,13 +82,16 @@ public class PaperEvaluationService {
         this.mapper = mapper;
     }
 
-    /** LIVE when paper trades met and (WR ≥ 60% OR paper profit ≥ 60% of stake). */
+    /** LIVE when paper sample met and WR ≥ threshold (profit alone cannot promote). */
     boolean passesLivePaperGate(PaperStatsService.PaperStats stats) {
         if (stats.closedTrades() < props.pipeline().minPaperTrades()) return false;
-        double stake = props.pipeline().paperStake().doubleValue();
-        double profitPct = stake <= 0 ? 0 : (stats.totalPnl().doubleValue() / stake) * 100.0;
-        return stats.winRate() >= props.pipeline().winRateThreshold()
-                || profitPct >= props.pipeline().minPaperProfitPct();
+        return stats.winRate() >= props.pipeline().winRateThreshold();
+    }
+
+    /** After full paper sample, WR below threshold → reject immediately. */
+    boolean failsPaperWinRateGate(PaperStatsService.PaperStats stats) {
+        return stats.closedTrades() >= props.pipeline().minPaperTrades()
+                && stats.winRate() < props.pipeline().winRateThreshold();
     }
 
     /**
@@ -141,7 +144,11 @@ public class PaperEvaluationService {
     Mono<Void> evaluateOne(Strategy strategy) {
         if ("LIVE_APPROVED".equals(strategy.status())) {
             return paperStats.forStrategy(strategy.id()).flatMap(stats -> {
-                // Re-check current gate so config raises (e.g. 10 → 100) demote premature LIVE.
+                // Full sample with WR below 60% → reject (do not keep a weak LIVE).
+                if (failsPaperWinRateGate(stats)) {
+                    return rejectLowPaperWinRate(strategy, stats);
+                }
+                // Sample incomplete after config raise (e.g. 30 → 100) → demote back to paper.
                 if (!passesLivePaperGate(stats)) {
                     log.warn("Demoting {} from LIVE_APPROVED — paper {}/{} trades wr={} pnl={}",
                             strategy.instrument(), stats.closedTrades(), props.pipeline().minPaperTrades(),
@@ -161,7 +168,7 @@ public class PaperEvaluationService {
                                             "paperTrades", String.valueOf(stats.closedTrades()),
                                             "requiredPaperTrades", String.valueOf(props.pipeline().minPaperTrades()),
                                             "paperWinRate", String.valueOf(stats.winRate()),
-                                            "reason", "paper stats below current LIVE gate"
+                                            "reason", "paper sample below current LIVE gate"
                                     )));
                 }
                 return bots.findByStrategyId(strategy.id())
@@ -174,22 +181,13 @@ public class PaperEvaluationService {
             });
         }
         // PAPER_TRADING: never purge on backtest LIVE quality — smoke gate already allowed paper.
-        // Accumulate paper fills (catchup + live signals); promote only when paper gate + LIVE BT pass.
+        // At 100 trades: WR < 60% → reject; WR ≥ 60% → promote when LIVE BT quality passes.
         return ensurePaperBotRunning(strategy).then(paperStats.forStrategy(strategy.id()).flatMap(stats -> {
             if (stats.closedTrades() < props.pipeline().minPaperTrades()) {
                 return kickPaperCatchup(strategy);
             }
-            if (!passesLivePaperGate(stats)) {
-                double stake = props.pipeline().paperStake().doubleValue();
-                double profitPct = stake <= 0 ? 0
-                        : (stats.totalPnl().doubleValue() / stake) * 100.0;
-                log.info("Paper gate trades met for {} ({}/{}) but WR {} / profit {}% — need WR>={} or profit>={}%",
-                        strategy.instrument(), stats.closedTrades(),
-                        props.pipeline().minPaperTrades(),
-                        stats.winRate(), String.format("%.1f", profitPct),
-                        props.pipeline().winRateThreshold(),
-                        props.pipeline().minPaperProfitPct());
-                return Mono.empty();
+            if (failsPaperWinRateGate(stats)) {
+                return rejectLowPaperWinRate(strategy, stats);
             }
             return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
                             strategy.tenantId(), strategy.id())
@@ -198,7 +196,7 @@ public class PaperEvaluationService {
                     .flatMap(bt -> {
                         JsonNode metrics = readMetrics(bt.metrics());
                         if (!pipeline.passesLiveBacktestQuality(metrics)) {
-                            // Paper passed gate but BT cannot support LIVE — keep paper, do not purge.
+                            // Paper WR OK but BT cannot support LIVE — keep paper, do not purge.
                             if (badBacktestLogged.add(strategy.id())) {
                                 log.info("Paper OK for {} but LIVE backtest quality FAIL — staying on paper",
                                         strategy.instrument());
@@ -213,6 +211,37 @@ public class PaperEvaluationService {
                                     strategy.id(), Map.of())
                             .then());
         }));
+    }
+
+    /**
+     * Hard-reject after full paper sample when win rate &lt; threshold.
+     * Purges the strategy so AutoStrategyScheduler can generate a replacement.
+     */
+    private Mono<Void> rejectLowPaperWinRate(Strategy strategy, PaperStatsService.PaperStats stats) {
+        String style = AutoStrategyScheduler.inferStyle(strategy);
+        log.warn("Rejecting {} ({}) — paper WR {} after {}/{} trades (need >={})",
+                strategy.instrument(), style,
+                stats.winRate(), stats.closedTrades(), props.pipeline().minPaperTrades(),
+                props.pipeline().winRateThreshold());
+        regenCooldown.block(strategy.instrument(), style,
+                java.time.Duration.ofHours(Math.max(1, props.pipeline().regenCooldownHours())));
+        UUID sid = strategy.id();
+        return bots.findByStrategyId(sid)
+                .filter(b -> "RUNNING".equals(b.status()))
+                .flatMap(b -> bots.save(withStatus(b, "STOPPED")))
+                .then()
+                .then(audit.record(strategy.tenantId(), strategy.userId(),
+                        "STRATEGY_REJECTED_PAPER_WIN_RATE", "STRATEGY", sid,
+                        Map.of(
+                                "style", style,
+                                "paperTrades", String.valueOf(stats.closedTrades()),
+                                "requiredPaperTrades", String.valueOf(props.pipeline().minPaperTrades()),
+                                "paperWinRate", String.valueOf(stats.winRate()),
+                                "requiredWinRate", String.valueOf(props.pipeline().winRateThreshold()),
+                                "paperPnl", String.valueOf(stats.totalPnl()),
+                                "reason", "paper win rate below 60% after full sample — purged for regen"
+                        )))
+                .then(purge.purgeStrategy(sid));
     }
 
     /** Keep paper bots RUNNING for PAPER_TRADING strategies (no LIVE sibling). */

@@ -41,10 +41,11 @@ app:
   cors:
     allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   pipeline:
-    # LIVE: paper sample + ≥60% win rate OR ≥60% paper profit (vs stake).
-    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:30}
+    # LIVE: ≥100 closed paper trades and ≥60% win rate.
+    # Below 60% WR at the trade sample → reject immediately and regen.
+    min-paper-trades: ${PIPELINE_MIN_PAPER_TRADES:100}
     win-rate-threshold: ${PIPELINE_WIN_RATE_THRESHOLD:0.60}
-    # Paper ROI % vs stake (e.g. 600 PnL on 1000 stake = 60).
+    # Paper ROI % vs stake (secondary LIVE promote signal with WR).
     min-paper-profit-pct: ${PIPELINE_MIN_PAPER_PROFIT_PCT:60}
     backtest-days: ${PIPELINE_BACKTEST_DAYS:30}
     paper-stake: ${PIPELINE_PAPER_STAKE:1000}

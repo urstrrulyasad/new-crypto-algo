@@ -133,7 +133,7 @@ export default function FuturesStrategies() {
 
       <Callout tone="info">
         Strategies are generated automatically per coin. Backtest is a smoke screen into paper.
-        LIVE when paper hits ≥60% win rate or ≥60% profit vs stake (plus enough trades and a
+        LIVE when paper hits ≥60% win rate over 100 closed trades (plus a
         quality backtest). Rejected/archived strategies are removed automatically.
       </Callout>
 
@@ -293,10 +293,9 @@ function PipelineStepper({ status, reason }: { status: string; reason?: string }
 
 function paperGateLikelyMet(paper?: PaperProgress | null) {
   if (!paper) return false
-  const need = paper.requiredTrades ?? 30
-  if ((paper.closedTrades ?? 0) < need) return false
+  const tradesNeed = paper.requiredTrades ?? 100
   const wrNeed = paper.requiredWinRate ?? 0.6
-  return (paper.winRate ?? 0) >= wrNeed || (paper.totalPnl ?? 0) > 0
+  return (paper.closedTrades ?? 0) >= tradesNeed && (paper.winRate ?? 0) >= wrNeed
 }
 
 function PaperBar({ paper, compact }: { paper: PaperProgress; compact?: boolean }) {
@@ -500,7 +499,7 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
           <div className="mb-1 text-xs font-medium uppercase tracking-widest text-slate-500">
             {detail.status === 'LIVE_APPROVED'
               ? 'Live gate passed — paper history below'
-              : `Paper gate: need ≥${Math.round((detail.paper?.requiredWinRate ?? 0.6) * 100)}% win rate over ${detail.paper?.requiredTrades ?? 30} closed trades`}
+              : `Paper gate: need ≥${Math.round((detail.paper?.requiredWinRate ?? 0.6) * 100)}% win rate over ${detail.paper?.requiredTrades ?? 100} closed trades — below that WR is auto-rejected`}
           </div>
           <PaperBar paper={detail.paper ?? strategy.paper} />
           <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-400">
@@ -533,7 +532,7 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
               </Button>
               {!paperGateLikelyMet(detail.paper) && (
                 <span className="text-xs text-slate-500">
-                  Enabled only when paper trades + WR/profit gate already pass (same as auto).
+                  Enabled only when paper trades + ≥60% WR gate already pass (same as auto).
                 </span>
               )}
               {approveErr && <span className="text-xs text-rose-400">{approveErr}</span>}
