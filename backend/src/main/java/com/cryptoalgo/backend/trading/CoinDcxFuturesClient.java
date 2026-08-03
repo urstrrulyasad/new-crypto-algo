@@ -95,13 +95,23 @@ public class CoinDcxFuturesClient {
                     if (i == null || i.isMissingNode() || i.isNull()) {
                         throw ApiException.upstream("CoinDCX instrument payload missing for " + pair);
                     }
+                    // CoinDCX often leaves max_leverage_long/short null and only exposes
+                    // dynamic_position_leverage_details keys (e.g. 2,3,5,10,20,30).
+                    BigDecimal maxLev = firstDecimalOrNull(i, "max_leverage_long", "max_leverage_short",
+                            "max_leverage");
+                    if (maxLev == null || maxLev.signum() <= 0) {
+                        maxLev = maxLeverageFromDynamic(i.path("dynamic_position_leverage_details"));
+                    }
+                    BigDecimal minQty = firstDecimalOrNull(i, "min_quantity", "min_trade_size");
+                    BigDecimal qtyStep = firstDecimalOrNull(i, "quantity_increment", "qty_step",
+                            "step_size", "unit_contract_value");
                     return new Instrument(
                             i.path("pair").asText(pair),
-                            decimalOrNull(i, "min_quantity"),
+                            minQty,
                             decimalOrNull(i, "min_notional"),
-                            firstDecimalOrNull(i, "max_leverage_long", "max_leverage"),
+                            maxLev,
                             decimalOrNull(i, "max_notional"),
-                            firstDecimalOrNull(i, "quantity_increment", "qty_step", "step_size", "contract_size"),
+                            qtyStep,
                             firstDecimalOrNull(i, "price_increment", "tick_size", "price_tick"),
                             firstDecimalOrNull(i, "maintenance_margin_rate", "maint_margin_rate",
                                     "maintenance_margin"));
@@ -129,6 +139,25 @@ public class CoinDcxFuturesClient {
             if (v != null) return v;
         }
         return null;
+    }
+
+    /** Highest leverage tier key from CoinDCX dynamic_position_leverage_details. */
+    private static BigDecimal maxLeverageFromDynamic(JsonNode dyn) {
+        if (dyn == null || !dyn.isObject() || dyn.isEmpty()) return null;
+        BigDecimal max = null;
+        var names = dyn.fieldNames();
+        while (names.hasNext()) {
+            String key = names.next();
+            try {
+                BigDecimal lev = new BigDecimal(key.trim());
+                if (lev.signum() > 0 && (max == null || lev.compareTo(max) > 0)) {
+                    max = lev;
+                }
+            } catch (Exception ignored) {
+                // skip non-numeric keys
+            }
+        }
+        return max;
     }
 
     /**

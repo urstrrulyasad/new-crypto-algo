@@ -318,8 +318,8 @@ public class ExecutionService {
         int configuredLev = bot.leverage() == null ? props.pipeline().futuresLeverage()
                 : bot.leverage().intValue();
         String margin = "INR";
-        // Deterministic client id for idempotency (persist before exchange submit).
-        String clientOrderId = "ca-f-" + signal.id() + "-" + bot.id();
+        // Must stay ≤ orders.client_order_id VARCHAR(80). Compact deterministic id.
+        String clientOrderId = compactClientOrderId(signal.id(), bot.id());
 
         return riskGate.isProtectionDegraded(bot.tenantId()).flatMap(degraded -> {
             if (degraded) {
@@ -327,104 +327,120 @@ public class ExecutionService {
                         clientOrderId, "tenant LIVE protection degraded — new entries blocked");
             }
             return orders.findByTenantIdAndClientOrderId(bot.tenantId(), clientOrderId)
-                    .flatMap(existing -> {
-                        if ("FAILED".equals(existing.status()) || "REJECTED".equals(existing.status())) {
-                            return Mono.<Void>empty();
+                    .map(java.util.Optional::of)
+                    .defaultIfEmpty(java.util.Optional.empty())
+                    .flatMap(opt -> {
+                        if (opt.isPresent()) {
+                            TradeOrder existing = opt.get();
+                            if ("FAILED".equals(existing.status()) || "REJECTED".equals(existing.status())) {
+                                // Retry after sizing/instrument fixes.
+                                return orders.deleteById(existing.id()).then(Mono.defer(() ->
+                                        submitSizedLiveEntry(bot, signal, pair, side, margin, configuredLev,
+                                                priceHint, posSide, slPrice, targetPrice, clientOrderId, slots, risk)));
+                            }
+                            log.info("Idempotent skip — order {} already {}", existing.id(), existing.status());
+                            return Mono.empty();
                         }
-                        log.info("Idempotent skip — order {} already {}", existing.id(), existing.status());
-                        return Mono.<Void>empty();
-                    })
-                    .switchIfEmpty(Mono.defer(() -> withKey(bot).flatMap(key ->
-                            futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
-                                    .switchIfEmpty(Mono.error(new IllegalStateException("INR balance unavailable")))
-                                    .flatMap(available0 -> {
-                                        // Top-up only when live wallet is empty-ish; amount from live balance gap, not hardcoded min notional.
-                                        Mono<BigDecimal> funded = available0.signum() > 0
-                                                ? Mono.just(available0)
-                                                : futuresClient.transferSpotToFutures(key.apiKey(), key.apiSecret(),
-                                                                "INR", bot.stakeAmount() == null
-                                                                        ? BigDecimal.ONE : bot.stakeAmount())
-                                                        .onErrorResume(e -> Mono.empty())
-                                                        .then(futuresClient.availableInrBalance(
-                                                                key.apiKey(), key.apiSecret()))
-                                                        .defaultIfEmpty(available0);
-                                        return funded.flatMap(available -> Mono.zip(
-                                                        futuresClient.usdtInrRate(),
-                                                        futuresClient.lastPrice(pair)
-                                                                .switchIfEmpty(priceHint != null && priceHint.signum() > 0
-                                                                        ? Mono.just(priceHint) : Mono.empty())
-                                                                .switchIfEmpty(Mono.error(new IllegalStateException(
-                                                                        "mark price unavailable"))),
-                                                        futuresClient.instrumentDetails(pair, margin),
-                                                        riskGate.reservedMargin(bot.tenantId()),
-                                                        portfolioRisk.openStakeForTenant(bot.tenantId())
-                                                ).flatMap(tuple -> {
-                                                    BigDecimal usdtInr = tuple.getT1();
-                                                    BigDecimal mark = tuple.getT2();
-                                                    var inst = tuple.getT3();
-                                                    BigDecimal reserved = tuple.getT4();
-                                                    BigDecimal openStake = tuple.getT5();
-
-                                                    if (!inst.hasRequiredSizingFields()) {
-                                                        return failLiveFutures(bot, signal, pair, side, mark,
-                                                                BigDecimal.ZERO, clientOrderId,
-                                                                "live instrument missing required sizing fields");
-                                                    }
-
-                                                    BigDecimal walletCap = available.multiply(
-                                                            BigDecimal.valueOf(props.pipeline().maxWalletPct()));
-                                                    BigDecimal maxUsable = walletCap
-                                                            .subtract(openStake)
-                                                            .subtract(reserved)
-                                                            .max(BigDecimal.ZERO);
-                                                    // Prefer bot stake, but allow bump up to wallet room
-                                                    // so CoinDCX min notional (~6 USDT) can clear.
-                                                    BigDecimal preferred = bot.stakeAmount() == null
-                                                            ? maxUsable
-                                                            : bot.stakeAmount().min(maxUsable);
-
-                                                    var sized = sizing.size(new LiveFuturesSizingService.SizeRequest(
-                                                            mark, usdtInr, configuredLev, preferred, maxUsable,
-                                                            risk.stoploss(), inst));
-                                                    if (!sized.ok()) {
-                                                        return failLiveFutures(bot, signal, pair, side, mark,
-                                                                sized.qty(), clientOrderId, sized.failReason());
-                                                    }
-
-                                                    return portfolioRisk.evaluateEntry(bot, pair, sized.marginInr(),
-                                                                    available, reserved)
-                                                            .flatMap(decision -> {
-                                                                if (!decision.ok()) {
-                                                                    return failLiveFutures(bot, signal, pair, side, mark,
-                                                                            sized.qty(), clientOrderId, decision.reason());
-                                                                }
-                                                                BigDecimal maxReservable = walletCap.subtract(openStake);
-                                                                return riskGate.tryReserve(bot.tenantId(),
-                                                                                sized.marginInr(), maxReservable)
-                                                                        .flatMap(reservedOk -> {
-                                                                            if (!reservedOk) {
-                                                                                return failLiveFutures(bot, signal, pair, side, mark,
-                                                                                        sized.qty(), clientOrderId,
-                                                                                        "concurrent wallet reservation failed");
-                                                                            }
-                                                                            TradeOrder pending = new TradeOrder(
-                                                                                    UUID.randomUUID(), bot.tenantId(), bot.userId(),
-                                                                                    bot.id(), signal.id(), null, clientOrderId,
-                                                                                    pair, side.toUpperCase(), "MARKET_ORDER",
-                                                                                    "FUTURES", "LIVE", "SUBMITTING",
-                                                                                    mark, sized.qty(), BigDecimal.ZERO, null,
-                                                                                    BigDecimal.ZERO, null,
-                                                                                    Instant.now(), Instant.now());
-                                                                            return template.insert(pending)
-                                                                                    .then(submitFuturesEntry(bot, signal, key, pair,
-                                                                                            side, margin, configuredLev, mark,
-                                                                                            posSide, slPrice, targetPrice,
-                                                                                            sized, clientOrderId, pending.id()));
-                                                                        });
-                                                            });
-                                                }));
-                                    }))));
+                        return submitSizedLiveEntry(bot, signal, pair, side, margin, configuredLev,
+                                priceHint, posSide, slPrice, targetPrice, clientOrderId, slots, risk);
+                    });
         });
+    }
+
+    private Mono<Void> submitSizedLiveEntry(Bot bot, Signal signal, String pair, String side,
+                                            String margin, int configuredLev, BigDecimal priceHint,
+                                            String posSide, BigDecimal slPrice, BigDecimal targetPrice,
+                                            String clientOrderId, int slots, Risk risk) {
+        return withKey(bot).flatMap(key ->
+                futuresClient.availableInrBalance(key.apiKey(), key.apiSecret())
+                        .switchIfEmpty(Mono.error(new IllegalStateException("INR balance unavailable")))
+                        .flatMap(available0 -> {
+                            Mono<BigDecimal> funded = available0.signum() > 0
+                                    ? Mono.just(available0)
+                                    : futuresClient.transferSpotToFutures(key.apiKey(), key.apiSecret(),
+                                                    "INR", bot.stakeAmount() == null
+                                                            ? BigDecimal.ONE : bot.stakeAmount())
+                                            .onErrorResume(e -> Mono.empty())
+                                            .then(futuresClient.availableInrBalance(
+                                                    key.apiKey(), key.apiSecret()))
+                                            .defaultIfEmpty(available0);
+                            return funded.flatMap(available -> Mono.zip(
+                                            futuresClient.usdtInrRate(),
+                                            futuresClient.lastPrice(pair)
+                                                    .switchIfEmpty(priceHint != null && priceHint.signum() > 0
+                                                            ? Mono.just(priceHint) : Mono.empty())
+                                                    .switchIfEmpty(Mono.error(new IllegalStateException(
+                                                            "mark price unavailable"))),
+                                            futuresClient.instrumentDetails(pair, margin),
+                                            riskGate.reservedMargin(bot.tenantId()),
+                                            portfolioRisk.openStakeForTenant(bot.tenantId())
+                                    ).flatMap(tuple -> {
+                                        BigDecimal usdtInr = tuple.getT1();
+                                        BigDecimal mark = tuple.getT2();
+                                        var inst = tuple.getT3();
+                                        BigDecimal reserved = tuple.getT4();
+                                        BigDecimal openStake = tuple.getT5();
+
+                                        if (!inst.hasRequiredSizingFields()) {
+                                            return failLiveFutures(bot, signal, pair, side, mark,
+                                                    BigDecimal.ZERO, clientOrderId,
+                                                    "live instrument missing required sizing fields"
+                                                            + " minQty=" + inst.minQuantity()
+                                                            + " minNotional=" + inst.minNotional()
+                                                            + " maxLev=" + inst.maxLeverage());
+                                        }
+
+                                        BigDecimal walletCap = available.multiply(
+                                                BigDecimal.valueOf(props.pipeline().maxWalletPct()));
+                                        BigDecimal maxUsable = walletCap
+                                                .subtract(openStake)
+                                                .subtract(reserved)
+                                                .max(BigDecimal.ZERO);
+                                        BigDecimal preferred = bot.stakeAmount() == null
+                                                ? maxUsable
+                                                : bot.stakeAmount().min(maxUsable);
+
+                                        var sized = sizing.size(new LiveFuturesSizingService.SizeRequest(
+                                                mark, usdtInr, configuredLev, preferred, maxUsable,
+                                                risk.stoploss(), inst));
+                                        if (!sized.ok()) {
+                                            return failLiveFutures(bot, signal, pair, side, mark,
+                                                    sized.qty(), clientOrderId, sized.failReason());
+                                        }
+
+                                        return portfolioRisk.evaluateEntry(bot, pair, sized.marginInr(),
+                                                        available, reserved)
+                                                .flatMap(decision -> {
+                                                    if (!decision.ok()) {
+                                                        return failLiveFutures(bot, signal, pair, side, mark,
+                                                                sized.qty(), clientOrderId, decision.reason());
+                                                    }
+                                                    BigDecimal maxReservable = walletCap.subtract(openStake);
+                                                    return riskGate.tryReserve(bot.tenantId(),
+                                                                    sized.marginInr(), maxReservable)
+                                                            .flatMap(reservedOk -> {
+                                                                if (!reservedOk) {
+                                                                    return failLiveFutures(bot, signal, pair, side, mark,
+                                                                            sized.qty(), clientOrderId,
+                                                                            "concurrent wallet reservation failed");
+                                                                }
+                                                                TradeOrder pending = new TradeOrder(
+                                                                        UUID.randomUUID(), bot.tenantId(), bot.userId(),
+                                                                        bot.id(), signal.id(), null, clientOrderId,
+                                                                        pair, side.toUpperCase(), "MARKET_ORDER",
+                                                                        "FUTURES", "LIVE", "SUBMITTING",
+                                                                        mark, sized.qty(), BigDecimal.ZERO, null,
+                                                                        BigDecimal.ZERO, null,
+                                                                        Instant.now(), Instant.now());
+                                                                return template.insert(pending)
+                                                                        .then(submitFuturesEntry(bot, signal, key, pair,
+                                                                                side, margin, configuredLev, mark,
+                                                                                posSide, slPrice, targetPrice,
+                                                                                sized, clientOrderId, pending.id()));
+                                                            });
+                                                });
+                                    }));
+                        }));
     }
 
     private Mono<Void> submitFuturesEntry(Bot bot, Signal signal, DecryptedKey key, String pair,
@@ -546,15 +562,30 @@ public class ExecutionService {
                                        BigDecimal price, BigDecimal qty, String clientOrderId,
                                        String reason) {
         log.warn("Bot {} skipped LIVE futures entry: {}", bot.id(), reason);
+        // Reuse compact clientOrderId (≤80). Never append UUIDs — that blew VARCHAR(80).
+        String failClientId = clientOrderId == null || clientOrderId.isBlank()
+                ? compactClientOrderId(signal.id(), bot.id())
+                : clientOrderId;
         TradeOrder failed = new TradeOrder(UUID.randomUUID(), bot.tenantId(), bot.userId(), bot.id(),
-                signal.id(), null, clientOrderId + "-fail-" + UUID.randomUUID(),
+                signal.id(), null, failClientId,
                 pair, side.toUpperCase(), "MARKET_ORDER", "FUTURES", "LIVE", "FAILED",
                 price, qty == null ? BigDecimal.ZERO : qty.max(BigDecimal.ZERO),
                 BigDecimal.ZERO, null, BigDecimal.ZERO, reason, Instant.now(), Instant.now());
         return template.insert(failed)
+                .onErrorResume(e -> {
+                    log.warn("Could not persist FAILED LIVE order for {}: {}", failClientId, e.toString());
+                    return Mono.empty();
+                })
                 .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_FUTURES_ORDER_FAILED",
                         "ORDER", failed.id(), Map.of("pair", pair, "side", side, "error", reason)))
                 .then(skip(bot, signal, reason));
+    }
+
+    /** Deterministic ≤80-char client order id for LIVE futures. */
+    static String compactClientOrderId(UUID signalId, UUID botId) {
+        String raw = "caf-" + signalId.toString().replace("-", "")
+                + botId.toString().replace("-", "");
+        return raw.length() <= 80 ? raw : raw.substring(0, 80);
     }
 
     private static boolean isAmbiguousSubmitError(Throwable e) {
