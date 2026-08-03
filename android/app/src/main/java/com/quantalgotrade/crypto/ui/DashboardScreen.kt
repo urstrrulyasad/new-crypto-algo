@@ -34,6 +34,8 @@ import com.quantalgotrade.crypto.data.Position
 import com.quantalgotrade.crypto.data.Summary
 import com.quantalgotrade.crypto.data.TradeOrder
 import com.quantalgotrade.crypto.data.Wallet
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -79,7 +81,16 @@ fun DashboardScreen(
         }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    val openLive = positions.count { it.status.equals("OPEN", ignoreCase = true) }
+
+    LaunchedEffect(openLive) {
+        reload()
+        val ms = if (openLive > 0) 2_000L else 12_000L
+        while (isActive) {
+            delay(ms)
+            reload()
+        }
+    }
 
     val pending = orders.filter { isPendingOrder(it) }
     val success = orders.filter { isSuccessOrder(it) }
@@ -90,6 +101,15 @@ fun DashboardScreen(
         OrderFilter.Success -> success
         OrderFilter.Failed -> failed
     }
+
+    val walletBalance = wallet?.let {
+        it.walletBalance ?: it.walletEquity ?: (it.available + (it.locked ?: 0.0))
+    }
+    val activePnl = wallet?.activePnl ?: live?.unrealizedPnl
+    val currentValue = wallet?.currentValue
+        ?: walletBalance?.let { it + (activePnl ?: 0.0) }
+    val estTotal = wallet?.estTotalFutures
+        ?: currentValue?.let { it + (wallet?.usdtValueInr ?: 0.0) }
 
     Column(Modifier.fillMaxSize()) {
         HeroHeader("Dashboard", "LIVE wallet · positions · orders")
@@ -110,29 +130,25 @@ fun DashboardScreen(
                         shape = RoundedCornerShape(20.dp),
                         colors = CardDefaults.cardColors(containerColor = scheme.surface),
                     ) {
-                        Column(Modifier.padding(18.dp)) {
+                        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("CoinDCX wallet", fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(8.dp))
                             if (wallet != null) {
-                                Text(
-                                    String.format(Locale.US, "%,.2f %s", wallet!!.available, wallet!!.currency),
-                                    style = MaterialTheme.typography.headlineMedium,
-                                    color = scheme.primary,
-                                    fontWeight = FontWeight.Bold,
+                                WalletRow("Available", fmtInr(wallet!!.available, signed = false), scheme.primary)
+                                WalletRow("Locked", fmtInr(wallet!!.locked, signed = false))
+                                WalletRow("Wallet balance", fmtInr(walletBalance, signed = false))
+                                WalletRow(
+                                    "Active PnL",
+                                    fmtInr(activePnl),
+                                    if ((activePnl ?: 0.0) >= 0) scheme.secondary else scheme.error,
                                 )
-                                Text(wallet!!.source, style = MaterialTheme.typography.bodySmall)
+                                WalletRow("Current value", fmtInr(currentValue, signed = false), scheme.primary)
+                                WalletRow("Est. futures", fmtInr(estTotal, signed = false))
+                                Text(wallet!!.source, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                             } else {
                                 Text(walletErr ?: "No wallet", color = scheme.error)
                             }
                         }
                     }
-                }
-                item(key = "pnl") {
-                    StatChip(
-                        "LIVE PnL",
-                        live?.let { String.format(Locale.US, "%,.2f", it.realizedPnl) } ?: "—",
-                        if ((live?.realizedPnl ?: 0.0) >= 0) scheme.secondary else scheme.error,
-                    )
                 }
                 item(key = "summary") {
                     Card(
@@ -149,13 +165,14 @@ fun DashboardScreen(
                             } else {
                                 StatRow("Open", s.openPositions.toString())
                                 StatRow("Closed", s.closedPositions.toString())
+                                StatRow("Realized PnL", fmtInr(s.realizedPnl))
                                 StatRow("Win rate", String.format(Locale.US, "%.1f%%", s.winRate * 100))
                             }
                             if (paper != null) {
                                 Spacer(Modifier.height(10.dp))
                                 Text("Paper", fontWeight = FontWeight.SemiBold, color = scheme.secondary)
                                 StatRow("Paper closed", paper!!.closedPositions.toString())
-                                StatRow("Paper PnL", String.format(Locale.US, "%,.2f", paper!!.realizedPnl))
+                                StatRow("Paper PnL", fmtInr(paper!!.realizedPnl))
                             }
                         }
                     }
@@ -167,6 +184,7 @@ fun DashboardScreen(
                     }
                 } else {
                     items(positions, key = { "live-${it.id}" }) { p ->
+                        val openPnl = p.pnl ?: p.unrealizedPnl ?: p.realizedPnl
                         Card(
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier
@@ -174,34 +192,38 @@ fun DashboardScreen(
                                 .clickable { onOpenChart(p.pair, p.id) },
                             colors = CardDefaults.cardColors(containerColor = scheme.surface),
                         ) {
-                            Column(Modifier.padding(14.dp)) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("${p.pair} · ${p.side}", fontWeight = FontWeight.Medium)
+                                    Text(
+                                        "${p.pair} · ${p.side}${p.leverage?.let { " · ${it.toInt()}x" } ?: ""}",
+                                        fontWeight = FontWeight.Medium,
+                                    )
                                     Text(p.status, color = scheme.onSurfaceVariant)
                                 }
-                                Text(String.format(Locale.US, "Entry ₹%,.6f", p.entryPrice), color = scheme.onSurfaceVariant)
-                                Text(
-                                    if (p.exitPrice != null) String.format(Locale.US, "Exit ₹%,.6f", p.exitPrice)
-                                    else "Exit —",
-                                    color = scheme.onSurfaceVariant,
-                                )
-                                Text("Qty ${p.quantity}", color = scheme.onSurfaceVariant)
+                                if (p.status.equals("OPEN", ignoreCase = true)) {
+                                    Text(
+                                        "Active PnL ${fmtInr(openPnl)}${p.roePct?.let { " (${String.format(Locale.US, "%+.2f%%", it)})" } ?: ""}",
+                                        color = if ((openPnl ?: 0.0) >= 0) scheme.secondary else scheme.error,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text("Margin ${fmtInr(p.marginInr, signed = false)} · Size ${fmtInr(p.sizeInr, signed = false)}", color = scheme.onSurfaceVariant)
+                                    Text("Entry ${fmtPrice(p.entryPrice)} · Mark ${fmtPrice(p.markPrice)}", color = scheme.onSurfaceVariant)
+                                    Text("SL ${fmtPrice(p.slPrice)} · TP ${fmtPrice(p.targetPrice)}", color = scheme.onSurfaceVariant)
+                                } else {
+                                    Text("Entry ${fmtPrice(p.entryPrice)}", color = scheme.onSurfaceVariant)
+                                    p.exitPrice?.let { Text("Exit ${fmtPrice(it)}", color = scheme.onSurfaceVariant) }
+                                    openPnl?.let {
+                                        Text(
+                                            "PnL ${fmtInr(it)}",
+                                            color = if (it >= 0) scheme.secondary else scheme.error,
+                                        )
+                                    }
+                                }
                                 Text(
                                     "Opened ${formatDateTime(p.openedAt)}",
                                     color = scheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.bodySmall,
                                 )
-                                Text(
-                                    "Closed ${formatDateTime(p.closedAt)}",
-                                    color = scheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                p.realizedPnl?.let {
-                                    Text(
-                                        String.format(Locale.US, "PnL ₹%,.2f", it),
-                                        color = if (it >= 0) scheme.secondary else scheme.error,
-                                    )
-                                }
                             }
                         }
                     }
@@ -253,11 +275,25 @@ fun DashboardScreen(
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                 }
-                                Text("Qty ${o.quantity}", color = scheme.onSurfaceVariant)
+                                val size = o.sizeInr?.let { fmtInr(it, signed = false) }
+                                Text(
+                                    listOfNotNull(
+                                        size?.let { "Size $it" },
+                                        "Qty ${o.quantity}",
+                                    ).joinToString(" · "),
+                                    color = scheme.onSurfaceVariant,
+                                )
                                 val detail = o.error?.takeIf { it.isNotBlank() }
-                                    ?: o.price?.let { String.format(Locale.US, "₹%,.6f", it) }
+                                    ?: o.avgPrice?.let { fmtPrice(it) }
+                                    ?: o.price?.let { fmtPrice(it) }
                                     ?: "—"
                                 Text(detail, color = scheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                                o.pnl?.let {
+                                    Text(
+                                        "PnL ${fmtInr(it)}",
+                                        color = if (it >= 0) scheme.secondary else scheme.error,
+                                    )
+                                }
                                 Text(
                                     "Order ${formatDateTime(o.createdAt)}",
                                     color = scheme.onSurfaceVariant,
@@ -270,6 +306,18 @@ fun DashboardScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WalletRow(
+    label: String,
+    value: String,
+    color: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, color = color, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -290,6 +338,27 @@ private fun OrderChip(
             selectedLabelColor = scheme.primary,
         ),
     )
+}
+
+private fun fmtInr(v: Double?, signed: Boolean = true): String {
+    if (v == null) return "—"
+    val abs = String.format(Locale.US, "%,.2f", kotlin.math.abs(v))
+    return when {
+        !signed -> "₹$abs"
+        v > 0 -> "+₹$abs"
+        v < 0 -> "-₹$abs"
+        else -> "₹$abs"
+    }
+}
+
+private fun fmtPrice(v: Double?): String {
+    if (v == null || v <= 0) return "—"
+    return when {
+        v >= 1000 -> String.format(Locale.US, "%.2f", v)
+        v >= 1 -> String.format(Locale.US, "%.4f", v)
+        v >= 0.01 -> String.format(Locale.US, "%.6f", v)
+        else -> String.format(Locale.US, "%.8f", v)
+    }
 }
 
 private fun isFailedOrder(o: TradeOrder): Boolean {

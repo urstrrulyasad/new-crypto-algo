@@ -35,6 +35,16 @@ export interface PriceLineSpec {
   style?: 'solid' | 'dashed'
 }
 
+/** CoinDCX-style precision for low-priced alts (avoids axis labels stuck at 0.00). */
+function priceFormatFromCandles(candles: Candle[]) {
+  const sample = candles.slice(-80).map((c) => c.close).filter((n) => Number.isFinite(n) && n > 0)
+  const min = sample.length ? Math.min(...sample) : 1
+  if (min >= 1000) return { type: 'price' as const, precision: 2, minMove: 0.01 }
+  if (min >= 1) return { type: 'price' as const, precision: 4, minMove: 0.0001 }
+  if (min >= 0.01) return { type: 'price' as const, precision: 6, minMove: 0.000001 }
+  return { type: 'price' as const, precision: 8, minMove: 0.00000001 }
+}
+
 export function CandleChart({
   candles,
   markers = [],
@@ -50,6 +60,7 @@ export function CandleChart({
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const linesRef = useRef<IPriceLine[]>([])
+  const fittedRef = useRef(false)
 
   useEffect(() => {
     if (!ref.current) return
@@ -72,6 +83,7 @@ export function CandleChart({
       },
     })
     chartRef.current = chart
+    fittedRef.current = false
 
     const series = chart.addSeries(CandlestickSeries, {
       upColor: '#34d399',
@@ -80,6 +92,7 @@ export function CandleChart({
       borderDownColor: '#fb7185',
       wickUpColor: '#34d39988',
       wickDownColor: '#fb718588',
+      priceFormat: { type: 'price', precision: 6, minMove: 0.000001 },
     })
     seriesRef.current = series
 
@@ -101,6 +114,8 @@ export function CandleChart({
     const series = seriesRef.current
     const chart = chartRef.current
     if (!series || !chart) return
+
+    series.applyOptions({ priceFormat: priceFormatFromCandles(candles) })
 
     series.setData(
       candles.map((c) => ({
@@ -135,7 +150,10 @@ export function CandleChart({
         }),
       )
 
-    if (candles.length) chart.timeScale().fitContent()
+    if (candles.length && !fittedRef.current) {
+      chart.timeScale().fitContent()
+      fittedRef.current = true
+    }
   }, [candles, markers, priceLines])
 
   return <div ref={ref} className="w-full" />
