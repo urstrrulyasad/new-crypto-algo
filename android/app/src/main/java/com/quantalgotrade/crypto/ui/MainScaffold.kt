@@ -55,7 +55,10 @@ fun MainScaffold(container: AppContainer, onLoggedOut: () -> Unit) {
         if (stack.size > 1) stack = stack.dropLast(1)
     }
 
-    BackHandler(enabled = stack.size > 1) { pop() }
+    // Chart/detail → previous screen; other tabs → Dashboard; Dashboard → leave app.
+    BackHandler(enabled = stack.size > 1 || tab != 0) {
+        if (stack.size > 1) pop() else tab = 0
+    }
 
     when (val dest = stack.last()) {
         is AppScreen.StrategyDetail -> {
