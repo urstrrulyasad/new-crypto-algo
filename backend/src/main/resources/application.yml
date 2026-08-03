@@ -65,6 +65,11 @@ app:
     min-backtest-profit-factor: ${PIPELINE_MIN_BACKTEST_PF:0.95}
     max-live-bots: ${PIPELINE_MAX_LIVE_BOTS:10}
     max-wallet-pct: ${PIPELINE_MAX_WALLET_PCT:0.5}
+    # Tenant risk policy (not exchange rules): per-asset / per-strategy wallet share.
+    max-asset-exposure-pct: ${PIPELINE_MAX_ASSET_EXPOSURE_PCT:0.35}
+    max-strategy-exposure-pct: ${PIPELINE_MAX_STRATEGY_EXPOSURE_PCT:0.25}
+    # Conservative approx buffer when exchange liquidation metadata is absent.
+    liquidation-safety-buffer: ${PIPELINE_LIQ_SAFETY_BUFFER:0.01}
     # Continuous LLM generation cadence (2 minutes).
     auto-gen-ms: ${PIPELINE_AUTO_GEN_MS:120000}
     evaluate-ms: ${PIPELINE_EVALUATE_MS:60000}

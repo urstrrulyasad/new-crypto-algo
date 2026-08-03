@@ -14,4 +14,5 @@ public interface PositionRepository extends ReactiveCrudRepository<Position, UUI
     Mono<Position> findByBotIdAndPairAndStatus(UUID botId, String pair, String status);
     Mono<Long> countByBotIdAndStatus(UUID botId, String status);
     Flux<Position> findByStatus(String status);
+    Flux<Position> findByTenantIdAndStatus(UUID tenantId, String status);
 }

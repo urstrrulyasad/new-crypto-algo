@@ -235,6 +235,11 @@ public class AutoStrategyScheduler {
                                 || "ARCHIVED".equalsIgnoreCase(s.status())) {
                             continue;
                         }
+                        // LIVE_APPROVED does not consume generation slots — keep creating
+                        // new strategies for the same coin while LIVE bots run.
+                        if ("LIVE_APPROVED".equalsIgnoreCase(s.status())) {
+                            continue;
+                        }
                         activeCount.merge(s.instrument(), 1, Integer::sum);
                         usedStyles.computeIfAbsent(s.instrument(), k -> new HashSet<>()).add(style);
                     }

@@ -289,6 +289,14 @@ function PipelineStepper({ status, reason }: { status: string; reason?: string }
   )
 }
 
+function paperGateLikelyMet(paper?: PaperProgress | null) {
+  if (!paper) return false
+  const need = paper.requiredTrades ?? 30
+  if ((paper.closedTrades ?? 0) < need) return false
+  const wrNeed = paper.requiredWinRate ?? 0.6
+  return (paper.winRate ?? 0) >= wrNeed || (paper.totalPnl ?? 0) > 0
+}
+
 function PaperBar({ paper, compact }: { paper: PaperProgress; compact?: boolean }) {
   const tradePct = Math.min(100, (paper.closedTrades / Math.max(1, paper.requiredTrades)) * 100)
   const winPct = Math.round(paper.winRate * 100)
@@ -358,6 +366,8 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
   const [trades, setTrades] = useState<StrategyTrade[]>([])
   const [orders, setOrders] = useState<StrategyOrder[]>([])
   const [skips, setSkips] = useState<LiveSkip[]>([])
+  const [approveBusy, setApproveBusy] = useState(false)
+  const [approveErr, setApproveErr] = useState('')
   const activeRef = useRef<Backtest | null>(null)
 
   const loadBacktests = () =>
@@ -417,6 +427,21 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
     }
   }
 
+  async function approveLive() {
+    setApproveBusy(true)
+    setApproveErr('')
+    try {
+      await api.post(`/api/v1/strategies/${strategy.id}/approve-live`)
+      const updated = await api.get<Strategy>(`/api/v1/strategies/${strategy.id}`)
+      setDetail(updated)
+      loadHistory()
+    } catch (e) {
+      setApproveErr(e instanceof Error ? e.message : 'Approve failed')
+    } finally {
+      setApproveBusy(false)
+    }
+  }
+
   const markers: TradeMarker[] = (active?.trades ?? []).flatMap((t) => [
     { time: t.entry_time, type: 'entry' as const },
     { time: t.exit_time, type: 'exit' as const, text: `${(t.profit_ratio * 100).toFixed(1)}%` },
@@ -468,29 +493,50 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
         />
       </div>
 
-      {(strategy.status === 'PAPER_TRADING' || strategy.status === 'LIVE_APPROVED') && (
+      {(detail.status === 'PAPER_TRADING' || detail.status === 'LIVE_APPROVED') && (
         <div className="mb-4 rounded-xl border border-edge/60 bg-surface/50 px-4 py-3">
           <div className="mb-1 text-xs font-medium uppercase tracking-widest text-slate-500">
-            {strategy.status === 'LIVE_APPROVED'
+            {detail.status === 'LIVE_APPROVED'
               ? 'Live gate passed — paper history below'
-              : `Paper gate: need ≥${Math.round(strategy.paper.requiredWinRate * 100)}% win rate over ${strategy.paper.requiredTrades} closed trades`}
+              : `Paper gate: need ≥${Math.round((detail.paper?.requiredWinRate ?? 0.6) * 100)}% win rate over ${detail.paper?.requiredTrades ?? 30} closed trades`}
           </div>
-          <PaperBar paper={strategy.paper} />
+          <PaperBar paper={detail.paper ?? strategy.paper} />
           <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-400">
             <span>
               Open:{' '}
-              <span className="text-cyan-300">{strategy.paper.openPositions ?? 0}</span>
+              <span className="text-cyan-300">{detail.paper?.openPositions ?? 0}</span>
             </span>
             <span>
-              Wins: <span className="text-emerald-400">{strategy.paper.wins}</span>
+              Wins: <span className="text-emerald-400">{detail.paper?.wins ?? 0}</span>
             </span>
             <span>
               Paper PnL:{' '}
-              <span className={strategy.paper.totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                ₹{Number(strategy.paper.totalPnl).toFixed(2)}
+              <span className={(detail.paper?.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                ₹{Number(detail.paper?.totalPnl ?? 0).toFixed(2)}
               </span>
             </span>
           </div>
+          {detail.status === 'PAPER_TRADING' && (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button
+                onClick={approveLive}
+                disabled={approveBusy || !paperGateLikelyMet(detail.paper)}
+                title={
+                  paperGateLikelyMet(detail.paper)
+                    ? 'Promote using existing paper + backtest gates'
+                    : 'Paper gate not met yet'
+                }
+              >
+                {approveBusy ? 'Approving…' : 'Approve for LIVE'}
+              </Button>
+              {!paperGateLikelyMet(detail.paper) && (
+                <span className="text-xs text-slate-500">
+                  Enabled only when paper trades + WR/profit gate already pass (same as auto).
+                </span>
+              )}
+              {approveErr && <span className="text-xs text-rose-400">{approveErr}</span>}
+            </div>
+          )}
         </div>
       )}
 

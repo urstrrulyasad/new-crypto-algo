@@ -83,13 +83,48 @@ public class PaperEvaluationService {
     }
 
     /** LIVE when paper trades met and (WR ≥ 60% OR paper profit ≥ 60% of stake). */
-    private boolean passesLivePaperGate(PaperStatsService.PaperStats stats) {
+    boolean passesLivePaperGate(PaperStatsService.PaperStats stats) {
         if (stats.closedTrades() < props.pipeline().minPaperTrades()) return false;
         double stake = props.pipeline().paperStake().doubleValue();
         double profitPct = stake <= 0 ? 0 : (stats.totalPnl().doubleValue() / stake) * 100.0;
         return stats.winRate() >= props.pipeline().winRateThreshold()
                 || profitPct >= props.pipeline().minPaperProfitPct();
     }
+
+    /**
+     * Manual approve — same gates as auto promotion (no force). Returns skip reason or null on success.
+     */
+    public Mono<ApproveLiveResult> approveLive(Strategy strategy) {
+        if (!"PAPER_TRADING".equals(strategy.status())) {
+            return Mono.just(new ApproveLiveResult(false, "strategy not in PAPER_TRADING", null));
+        }
+        return paperStats.forStrategy(strategy.id()).flatMap(stats ->
+                backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
+                                strategy.tenantId(), strategy.id())
+                        .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
+                        .next()
+                        .flatMap(bt -> {
+                            JsonNode metrics = readMetrics(bt.metrics());
+                            if (!pipeline.passesLiveBacktestQuality(metrics)) {
+                                return Mono.just(new ApproveLiveResult(false,
+                                        "backtest quality gate failed", stats));
+                            }
+                            if (!passesLivePaperGate(stats)) {
+                                return Mono.just(new ApproveLiveResult(false,
+                                        "paper gate not met (trades/WR/profit)", stats));
+                            }
+                            return promote(strategy, stats)
+                                    .then(audit.record(strategy.tenantId(), strategy.userId(),
+                                            "STRATEGY_MANUAL_PROMOTED_LIVE", "STRATEGY", strategy.id(),
+                                            Map.of("closedTrades", String.valueOf(stats.closedTrades()),
+                                                    "winRate", String.valueOf(stats.winRate()))))
+                                    .thenReturn(new ApproveLiveResult(true, null, stats));
+                        })
+                        .switchIfEmpty(Mono.just(new ApproveLiveResult(false,
+                                "no DONE backtest", stats))));
+    }
+
+    public record ApproveLiveResult(boolean ok, String reason, PaperStatsService.PaperStats paper) {}
 
     @Scheduled(fixedDelayString = "${app.pipeline.evaluate-ms:60000}")
     public void evaluate() {
@@ -334,9 +369,44 @@ public class PaperEvaluationService {
                                                     BigDecimal perBot = maxUse.divide(
                                                             BigDecimal.valueOf(slotsLeft),
                                                             java.math.MathContext.DECIMAL64);
+                                                    // Planning stake only — LIVE execution re-sizes from fresh meta.
                                                     BigDecimal stake = paperBot.stakeAmount()
                                                             .min(perBot).min(maxUse);
-                                                    if (stake.signum() <= 0) {
+                                                    String instrument = strategy.instrument();
+                                                    Mono<BigDecimal> planned = (instrument == null || instrument.isBlank())
+                                                            ? Mono.just(stake)
+                                                            : futures.usdtInrRate()
+                                                            .zipWith(futures.instrumentDetails(instrument, margin)
+                                                                    .onErrorResume(e -> Mono.empty()))
+                                                            .zipWith(futures.lastPrice(instrument)
+                                                                    .onErrorResume(e -> Mono.empty()))
+                                                            .map(t -> {
+                                                                BigDecimal usdtInr = t.getT1().getT1();
+                                                                var inst = t.getT1().getT2();
+                                                                BigDecimal px = t.getT2();
+                                                                if (inst == null || !inst.hasRequiredSizingFields()
+                                                                        || px == null || px.signum() <= 0
+                                                                        || usdtInr.signum() <= 0) {
+                                                                    return stake;
+                                                                }
+                                                                int lev = paperBot.leverage() == null ? 1
+                                                                        : paperBot.leverage().intValue();
+                                                                if (inst.maxLeverage() != null
+                                                                        && BigDecimal.valueOf(lev)
+                                                                        .compareTo(inst.maxLeverage()) > 0) {
+                                                                    lev = inst.maxLeverage().intValue();
+                                                                }
+                                                                BigDecimal minQty = inst.minNotional()
+                                                                        .divide(px, java.math.MathContext.DECIMAL64)
+                                                                        .max(inst.minQuantity());
+                                                                BigDecimal need = minQty.multiply(px).multiply(usdtInr)
+                                                                        .divide(BigDecimal.valueOf(Math.max(1, lev)),
+                                                                                java.math.MathContext.DECIMAL64);
+                                                                return stake.max(need).min(maxUse);
+                                                            })
+                                                            .defaultIfEmpty(stake);
+                                                    return planned.flatMap(finalStake -> {
+                                                    if (finalStake.signum() <= 0) {
                                                         return audit.record(strategy.tenantId(),
                                                                         strategy.userId(),
                                                                         "AUTO_LIVE_SKIPPED_NO_BALANCE",
@@ -349,7 +419,7 @@ public class PaperEvaluationService {
                                                     Bot live = new Bot(UUID.randomUUID(), strategy.tenantId(),
                                                             strategy.userId(), strategy.id(), key.id(),
                                                             strategy.name() + " · live", "LIVE", "FUTURES",
-                                                            paperBot.pairs(), margin, stake,
+                                                            paperBot.pairs(), margin, finalStake,
                                                             paperBot.maxOpenTrades(), paperBot.leverage(),
                                                             "RUNNING", false, margin,
                                                             Instant.now(), Instant.now());
@@ -360,9 +430,10 @@ public class PaperEvaluationService {
                                                                     "STRATEGY", strategy.id(),
                                                                     Map.of("winRate", String.valueOf(stats.winRate()),
                                                                             "closedTrades", String.valueOf(stats.closedTrades()),
-                                                                            "stake", stake.toPlainString(),
+                                                                            "stake", finalStake.toPlainString(),
                                                                             "available", available.toPlainString(),
                                                                             "marginCurrency", margin)));
+                                                    });
                                                 });
                                     }));
                 });

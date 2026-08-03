@@ -40,6 +40,15 @@ public record AppProperties(
             double minBacktestProfitFactor,
             int maxLiveBots,
             double maxWalletPct,
+            /** Max share of wallet margin allowed on one futures pair (tenant policy). */
+            double maxAssetExposurePct,
+            /** Max share of wallet margin allowed for one strategy (tenant policy). */
+            double maxStrategyExposurePct,
+            /**
+             * Conservative SL-vs-leverage buffer when CoinDCX does not return liquidation
+             * metadata. Labelled approx only — never treated as exchange liquidation price.
+             */
+            double liquidationSafetyBuffer,
             long autoGenMs,
             /** Active (non-REJECTED/ARCHIVED) strategies allowed per instrument. */
             int maxStrategiesPerInstrument,

@@ -60,6 +60,7 @@ public class StrategyController {
     private final TradeOrderRepository tradeOrders;
     private final AuditLogRepository auditLogs;
     private final PaperStatsService paperStats;
+    private final PaperEvaluationService paperEvaluation;
     private final DatabaseClient db;
     private final ObjectMapper mapper;
     private final AppProperties props;
@@ -67,6 +68,7 @@ public class StrategyController {
     public StrategyController(StrategyRepository strategies, BotRepository bots,
                               PositionRepository positions, TradeOrderRepository tradeOrders,
                               AuditLogRepository auditLogs, PaperStatsService paperStats,
+                              PaperEvaluationService paperEvaluation,
                               DatabaseClient db, ObjectMapper mapper, AppProperties props) {
         this.strategies = strategies;
         this.bots = bots;
@@ -74,6 +76,7 @@ public class StrategyController {
         this.tradeOrders = tradeOrders;
         this.auditLogs = auditLogs;
         this.paperStats = paperStats;
+        this.paperEvaluation = paperEvaluation;
         this.db = db;
         this.mapper = mapper;
         this.props = props;
@@ -174,6 +177,32 @@ public class StrategyController {
                         .filter(a -> a.action() != null && a.action().startsWith("AUTO_LIVE_SKIPPED"))
                         .take(20)
                         .map(a -> new LiveSkip(a.action(), readJson(a.details()), a.createdAt())));
+    }
+
+    public record ApproveLiveResponse(boolean ok, String status, String reason,
+                                      PaperProgress paper) {}
+
+    /**
+     * Manual promote to LIVE — only when existing paper + backtest gates already pass (no force).
+     */
+    @PostMapping("/{id}/approve-live")
+    public Mono<ApproveLiveResponse> approveLive(@PathVariable UUID id) {
+        return CurrentUser.get().flatMap(p -> strategies.findByIdAndTenantId(id, p.tenantId())
+                .switchIfEmpty(Mono.error(ApiException.notFound("Strategy not found")))
+                .flatMap(s -> paperEvaluation.approveLive(s)
+                        .flatMap(res -> {
+                            if (!res.ok()) {
+                                return Mono.error(ApiException.badRequest(
+                                        res.reason() == null ? "approve-live failed" : res.reason()));
+                            }
+                            PaperProgress paper = res.paper() == null ? null
+                                    : new PaperProgress(res.paper().closedTrades(), res.paper().wins(),
+                                    res.paper().winRate(), res.paper().totalPnl(),
+                                    props.pipeline().minPaperTrades(),
+                                    props.pipeline().winRateThreshold(), 0);
+                            return strategies.findById(s.id())
+                                    .map(updated -> new ApproveLiveResponse(true, updated.status(), null, paper));
+                        })));
     }
 
     private StrategyTrade toTrade(Position pos, String mode) {

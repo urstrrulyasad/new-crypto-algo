@@ -55,6 +55,7 @@ export default function Dashboard() {
   const [positions, setPositions] = useState<Position[] | null>(null)
   const [orders, setOrders] = useState<Order[] | null>(null)
   const [stopping, setStopping] = useState(false)
+  const [orderFilter, setOrderFilter] = useState<'pending' | 'success' | 'failed'>('pending')
 
   const load = () => {
     api.get<Summary>('/api/v1/portfolio/summary?mode=LIVE').then(setSummary).catch(() => setSummary(null))
@@ -94,6 +95,12 @@ export default function Dashboard() {
       setStopping(false)
     }
   }
+
+  const pendingOrders = (orders ?? []).filter(isPendingOrder)
+  const successOrders = (orders ?? []).filter(isSuccessOrder)
+  const failedOrders = (orders ?? []).filter(isFailedOrder)
+  const filteredOrders =
+    orderFilter === 'pending' ? pendingOrders : orderFilter === 'success' ? successOrders : failedOrders
 
   return (
     <PageShell>
@@ -187,13 +194,37 @@ export default function Dashboard() {
         </Card>
 
         <Card delay={0.15}>
-          <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
-            LIVE orders
-          </h2>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
+              LIVE orders
+            </h2>
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  ['pending', pendingOrders.length, 'Pending'],
+                  ['success', successOrders.length, 'Success'],
+                  ['failed', failedOrders.length, 'Failed'],
+                ] as const
+              ).map(([key, count, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setOrderFilter(key)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    orderFilter === key
+                      ? 'bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-500/40'
+                      : 'bg-surface/60 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {label} · {orders === null ? '—' : count}
+                </button>
+              ))}
+            </div>
+          </div>
           {orders === null ? (
             <Spinner />
-          ) : orders.length === 0 ? (
-            <Empty message="No LIVE orders yet." />
+          ) : filteredOrders.length === 0 ? (
+            <Empty message={`No ${orderFilter} LIVE orders.`} />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
@@ -207,7 +238,7 @@ export default function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.slice(0, 30).map((o, i) => (
+                  {filteredOrders.slice(0, 40).map((o, i) => (
                     <motion.tr
                       key={o.id}
                       initial={{ opacity: 0, x: -6 }}
@@ -221,7 +252,11 @@ export default function Dashboard() {
                       <td className="py-2.5 pr-4 font-medium text-slate-200">{o.pair}</td>
                       <td className="py-2.5 pr-4">{o.side}</td>
                       <td className="py-2.5 pr-4">
-                        <Badge tone={o.status === 'FAILED' ? 'danger' : o.status === 'OPEN' || o.status === 'FILLED' ? 'success' : 'default'}>
+                        <Badge
+                          tone={
+                            isFailedOrder(o) ? 'danger' : isSuccessOrder(o) ? 'success' : 'warn'
+                          }
+                        >
                           {o.status}
                         </Badge>
                       </td>
@@ -239,6 +274,19 @@ export default function Dashboard() {
       </div>
     </PageShell>
   )
+}
+
+function isFailedOrder(o: Order) {
+  const s = (o.status || '').toUpperCase()
+  return s === 'FAILED' || s === 'REJECTED' || s === 'CANCELLED'
+}
+
+function isSuccessOrder(o: Order) {
+  return (o.status || '').toUpperCase() === 'FILLED'
+}
+
+function isPendingOrder(o: Order) {
+  return !isFailedOrder(o) && !isSuccessOrder(o)
 }
 
 function fmtInr(v?: number | null, signed = true) {

@@ -34,8 +34,23 @@ public class CoinDcxFuturesClient {
 
     private static final Logger log = LoggerFactory.getLogger(CoinDcxFuturesClient.class);
 
-    public record Instrument(String pair, BigDecimal minQuantity, BigDecimal minNotional,
-                             BigDecimal maxLeverage, BigDecimal maxNotional) {}
+    public record Instrument(
+            String pair,
+            BigDecimal minQuantity,
+            BigDecimal minNotional,
+            BigDecimal maxLeverage,
+            BigDecimal maxNotional,
+            BigDecimal quantityStep,
+            BigDecimal priceTick,
+            BigDecimal maintenanceMarginRate
+    ) {
+        /** Required fields for fail-closed LIVE sizing — all from live CoinDCX payload. */
+        public boolean hasRequiredSizingFields() {
+            return minQuantity != null && minQuantity.signum() > 0
+                    && minNotional != null && minNotional.signum() > 0
+                    && maxLeverage != null && maxLeverage.signum() > 0;
+        }
+    }
 
     private final WebClient api;
     private final WebClient publicApi;
@@ -77,15 +92,43 @@ public class CoinDcxFuturesClient {
                 .timeout(Duration.ofSeconds(20))
                 .map(body -> {
                     JsonNode i = body.path("instrument");
+                    if (i == null || i.isMissingNode() || i.isNull()) {
+                        throw ApiException.upstream("CoinDCX instrument payload missing for " + pair);
+                    }
                     return new Instrument(
                             i.path("pair").asText(pair),
-                            new BigDecimal(i.path("min_quantity").asText("0")),
-                            new BigDecimal(i.path("min_notional").asText("0")),
-                            new BigDecimal(i.path("max_leverage_long").asText("1")),
-                            new BigDecimal(i.path("max_notional").asText("0")));
+                            decimalOrNull(i, "min_quantity"),
+                            decimalOrNull(i, "min_notional"),
+                            firstDecimalOrNull(i, "max_leverage_long", "max_leverage"),
+                            decimalOrNull(i, "max_notional"),
+                            firstDecimalOrNull(i, "quantity_increment", "qty_step", "step_size", "contract_size"),
+                            firstDecimalOrNull(i, "price_increment", "tick_size", "price_tick"),
+                            firstDecimalOrNull(i, "maintenance_margin_rate", "maint_margin_rate",
+                                    "maintenance_margin"));
                 })
                 .onErrorMap(e -> !(e instanceof ApiException),
                         e -> ApiException.upstream("CoinDCX futures instrument failed: " + e.getMessage()));
+    }
+
+    private static BigDecimal decimalOrNull(JsonNode node, String field) {
+        if (node == null || !node.has(field) || node.get(field).isNull()
+                || node.get(field).asText("").isBlank()) {
+            return null;
+        }
+        try {
+            BigDecimal v = new BigDecimal(node.get(field).asText());
+            return v;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static BigDecimal firstDecimalOrNull(JsonNode node, String... fields) {
+        for (String f : fields) {
+            BigDecimal v = decimalOrNull(node, f);
+            if (v != null) return v;
+        }
+        return null;
     }
 
     /**
@@ -203,23 +246,36 @@ public class CoinDcxFuturesClient {
     public Mono<JsonNode> placeOrder(String apiKey, String apiSecret, String pair, String side,
                                      BigDecimal quantity, int leverage, String marginCurrency,
                                      BigDecimal takeProfit, BigDecimal stopLoss) {
+        return placeOrder(apiKey, apiSecret, pair, side, quantity, leverage, marginCurrency,
+                takeProfit, stopLoss, null);
+    }
+
+    public Mono<JsonNode> placeOrder(String apiKey, String apiSecret, String pair, String side,
+                                     BigDecimal quantity, int leverage, String marginCurrency,
+                                     BigDecimal takeProfit, BigDecimal stopLoss, String clientOrderId) {
         // CoinDCX: do NOT send time_in_force on market orders (docs: causes 400).
-        // Many INR alts require whole-unit qty ("divisible by 1.0").
-        BigDecimal qty = quantity.setScale(0, java.math.RoundingMode.DOWN);
-        if (qty.signum() <= 0) {
-            return Mono.error(ApiException.badRequest("futures qty rounds to zero"));
+        // Quantity scale must come from live instrument step when available — callers round first.
+        if (quantity == null || quantity.signum() <= 0) {
+            return Mono.error(ApiException.badRequest("futures qty must be positive"));
         }
         ObjectNode order = mapper.createObjectNode();
         order.put("side", side.toLowerCase());
         order.put("pair", pair);
         order.put("order_type", "market_order");
-        order.put("total_quantity", qty.longValueExact());
+        // Prefer integer when scale is 0 (common CoinDCX INR contracts); else plain decimal.
+        if (quantity.stripTrailingZeros().scale() <= 0) {
+            order.put("total_quantity", quantity.longValueExact());
+        } else {
+            order.put("total_quantity", quantity.doubleValue());
+        }
         order.put("leverage", leverage);
         order.put("notification", "no_notification");
         order.put("hidden", false);
         order.put("post_only", false);
-        // Docs request table: string; older examples used an array — string is accepted.
         order.put("margin_currency_short_name", marginCurrency);
+        if (clientOrderId != null && !clientOrderId.isBlank()) {
+            order.put("client_order_id", clientOrderId);
+        }
         if (takeProfit != null) order.put("take_profit_price", takeProfit);
         if (stopLoss != null) order.put("stop_loss_price", stopLoss);
 
@@ -227,6 +283,39 @@ public class CoinDcxFuturesClient {
         body.put("timestamp", System.currentTimeMillis());
         body.set("order", order);
         return signedPost("/exchange/v1/derivatives/futures/orders/create", body, apiKey, apiSecret);
+    }
+
+    /** Look up futures orders and find one matching client_order_id (for ambiguous timeout reconcile). */
+    public Mono<JsonNode> findOrderByClientOrderId(String apiKey, String apiSecret,
+                                                   String pair, String clientOrderId) {
+        if (clientOrderId == null || clientOrderId.isBlank()) {
+            return Mono.empty();
+        }
+        ObjectNode body = mapper.createObjectNode();
+        body.put("timestamp", System.currentTimeMillis());
+        body.put("pair", pair);
+        body.put("page", "1");
+        body.put("size", "50");
+        body.put("margin_currency_short_name", "INR");
+        return signedPost("/exchange/v1/derivatives/futures/orders", body, apiKey, apiSecret)
+                .flatMap(resp -> {
+                    JsonNode list = resp.path("orders");
+                    if (!list.isArray()) list = resp.path("data");
+                    if (!list.isArray()) {
+                        return Mono.empty();
+                    }
+                    for (JsonNode o : list) {
+                        String cid = o.path("client_order_id").asText("");
+                        if (clientOrderId.equals(cid)) {
+                            return Mono.just(o);
+                        }
+                    }
+                    return Mono.empty();
+                })
+                .onErrorResume(e -> {
+                    log.warn("findOrderByClientOrderId failed: {}", e.getMessage());
+                    return Mono.empty();
+                });
     }
 
     public record WalletBalance(String currency, BigDecimal available) {}

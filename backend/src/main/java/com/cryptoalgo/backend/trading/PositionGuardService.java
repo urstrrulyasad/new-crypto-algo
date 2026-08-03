@@ -40,16 +40,22 @@ public class PositionGuardService {
     private final CoinDcxFuturesClient futures;
     private final ExecutionService execution;
     private final CoinDcxTradeClient trade;
+    private final TenantLiveRiskGate riskGate;
+    private final com.cryptoalgo.backend.common.AuditService audit;
 
     public PositionGuardService(PositionRepository positions, BotRepository bots,
                                 TickerService ticker, CoinDcxFuturesClient futures,
-                                ExecutionService execution, CoinDcxTradeClient trade) {
+                                ExecutionService execution, CoinDcxTradeClient trade,
+                                TenantLiveRiskGate riskGate,
+                                com.cryptoalgo.backend.common.AuditService audit) {
         this.positions = positions;
         this.bots = bots;
         this.ticker = ticker;
         this.futures = futures;
         this.execution = execution;
         this.trade = trade;
+        this.riskGate = riskGate;
+        this.audit = audit;
     }
 
     @Scheduled(fixedDelayString = "${app.guard-ms:5000}")
@@ -78,6 +84,8 @@ public class PositionGuardService {
                     return Mono.empty();
                 }))
                 .flatMap(bot -> markPrice(bot, pos.pair())
+                .switchIfEmpty(Mono.defer(() -> onMissingMark(bot, pos)
+                        .then(Mono.empty())))
                 .flatMap(price -> {
                     boolean isShort = "SHORT".equals(pos.side());
                     boolean hitSl = pos.slPrice() != null && (isShort
@@ -111,16 +119,22 @@ public class PositionGuardService {
                     }
                     if (maxHold) return Mono.empty();
                     return hitTarget ? liveTarget(bot, pos, price) : liveSlCheck(bot, pos, price);
-                })
-                .switchIfEmpty(Mono.defer(() -> {
-                    // No mark price — still force-close ancient paper so catchup can refill.
-                    if (!"PAPER".equals(bot.mode()) || pos.openedAt() == null) return Mono.empty();
-                    if (!pos.openedAt().isBefore(Instant.now().minus(PAPER_MAX_HOLD))) return Mono.empty();
-                    log.warn("Paper guard MAX_HOLD without mark for {} open since {}",
-                            pos.pair(), pos.openedAt());
-                    return execution.closePaperPosition(bot, pos,
-                            pos.entryPrice(), null, "MAX_HOLD");
-                })));
+                }));
+    }
+
+    private Mono<Void> onMissingMark(Bot bot, Position pos) {
+        if ("LIVE".equals(bot.mode())) {
+            return riskGate.setProtectionDegraded(bot.tenantId(), true)
+                    .then(audit.record(bot.tenantId(), bot.userId(),
+                            "LIVE_GUARD_MARK_UNAVAILABLE", "POSITION", pos.id(),
+                            java.util.Map.of("pair", pos.pair())))
+                    .then();
+        }
+        if (!"PAPER".equals(bot.mode()) || pos.openedAt() == null) return Mono.empty();
+        if (!pos.openedAt().isBefore(Instant.now().minus(PAPER_MAX_HOLD))) return Mono.empty();
+        log.warn("Paper guard MAX_HOLD without mark for {} open since {}",
+                pos.pair(), pos.openedAt());
+        return execution.closePaperPosition(bot, pos, pos.entryPrice(), null, "MAX_HOLD");
     }
 
     private Mono<BigDecimal> markPrice(Bot bot, String pair) {
