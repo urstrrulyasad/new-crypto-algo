@@ -183,7 +183,7 @@ fun StrategyDetailScreen(
                                     }
                                     if (!gateOk) {
                                         Text(
-                                            "Same as web: needs enough paper trades and WR/profit gate.",
+                                            "Need ${s.paper?.requiredTrades ?: 100} closed paper trades and ≥${((s.paper?.requiredWinRate ?: 0.6) * 100).toInt()}% win rate. Below that WR is auto-rejected.",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = scheme.onSurfaceVariant,
                                         )
@@ -246,7 +246,7 @@ private fun paperGateLikelyMet(paper: com.quantalgotrade.crypto.data.PaperProgre
     if (paper == null) return false
     val need = paper.requiredTrades.coerceAtLeast(1)
     if (paper.closedTrades < need) return false
-    return paper.winRate >= paper.requiredWinRate || paper.totalPnl > 0
+    return paper.winRate >= paper.requiredWinRate
 }
 
 @Composable
