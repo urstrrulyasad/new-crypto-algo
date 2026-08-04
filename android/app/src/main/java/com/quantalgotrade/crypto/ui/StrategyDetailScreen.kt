@@ -29,9 +29,9 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -39,7 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.quantalgotrade.crypto.data.AppContainer
 import com.quantalgotrade.crypto.data.Strategy
 import com.quantalgotrade.crypto.data.StrategyTrade
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,17 +56,17 @@ fun StrategyDetailScreen(
     var initialLoading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var approveBusy by remember { mutableStateOf(false) }
-    var approveMsg by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
+    var refreshSignal by remember { mutableIntStateOf(0) }
     val scheme = MaterialTheme.colorScheme
 
-    suspend fun reload() {
+    LaunchedEffect(strategyId, refreshSignal) {
         error = null
         try {
             strategy = container.api.strategy(strategyId)
             trades = runCatching { container.api.strategyTrades(strategyId, "PAPER") }
                 .getOrDefault(emptyList())
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Failed to load strategy"
         } finally {
@@ -74,8 +74,6 @@ fun StrategyDetailScreen(
             refreshing = false
         }
     }
-
-    LaunchedEffect(strategyId) { reload() }
 
     val open = trades.filter { it.status == "OPEN" }
     val closed = trades.filter { it.status != "OPEN" }
@@ -97,7 +95,10 @@ fun StrategyDetailScreen(
         )
         PullRefreshColumn(
             refreshing = refreshing,
-            onRefresh = { scope.launch { refreshing = true; reload() } },
+            onRefresh = {
+                refreshing = true
+                refreshSignal++
+            },
             initialLoading = initialLoading,
             error = error,
         ) {
@@ -147,54 +148,12 @@ fun StrategyDetailScreen(
                                     )
                                 }
                                 if (s.status == "PAPER_TRADING") {
-                                    Spacer(Modifier.height(12.dp))
-                                    val gateOk = paperGateLikelyMet(s.paper)
-                                    Button(
-                                        onClick = {
-                                            scope.launch {
-                                                approveBusy = true
-                                                approveMsg = null
-                                                try {
-                                                    val resp = container.api.approveLive(s.id)
-                                                    approveMsg = if (resp.ok) {
-                                                        "Approved for LIVE"
-                                                    } else {
-                                                        resp.reason ?: "Approve failed"
-                                                    }
-                                                    reload()
-                                                } catch (e: Exception) {
-                                                    approveMsg = e.message ?: "Approve failed"
-                                                } finally {
-                                                    approveBusy = false
-                                                }
-                                            }
-                                        },
-                                        enabled = !approveBusy && gateOk,
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(14.dp),
-                                    ) {
-                                        Text(
-                                            when {
-                                                approveBusy -> "Approving…"
-                                                !gateOk -> "Paper gate not met yet"
-                                                else -> "Approve for LIVE"
-                                            },
-                                        )
-                                    }
-                                    if (!gateOk) {
-                                        Text(
-                                            "Need ${s.paper?.requiredTrades ?: 100} closed paper trades and ≥${((s.paper?.requiredWinRate ?: 0.6) * 100).toInt()}% win rate. Below that WR is auto-rejected.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = scheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    approveMsg?.let {
-                                        Text(
-                                            it,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (it.contains("Approved")) scheme.secondary else scheme.error,
-                                        )
-                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        "LIVE is automatic after ${s.paper?.requiredTrades ?: 100} paper trades at ≥${((s.paper?.requiredWinRate ?: 0.6) * 100).toInt()}% win rate. Below that WR the strategy is auto-rejected.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurfaceVariant,
+                                    )
                                 }
                                 if (!pair.isNullOrBlank()) {
                                     Spacer(Modifier.height(12.dp))
@@ -240,13 +199,6 @@ fun StrategyDetailScreen(
             }
         }
     }
-}
-
-private fun paperGateLikelyMet(paper: com.quantalgotrade.crypto.data.PaperProgress?): Boolean {
-    if (paper == null) return false
-    val need = paper.requiredTrades.coerceAtLeast(1)
-    if (paper.closedTrades < need) return false
-    return paper.winRate >= paper.requiredWinRate
 }
 
 @Composable

@@ -22,9 +22,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -34,9 +34,8 @@ import com.quantalgotrade.crypto.data.Position
 import com.quantalgotrade.crypto.data.Summary
 import com.quantalgotrade.crypto.data.TradeOrder
 import com.quantalgotrade.crypto.data.Wallet
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.util.Locale
 
 private enum class OrderFilter { All, Pending, Success, Failed }
@@ -56,39 +55,38 @@ fun DashboardScreen(
     var initialLoading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
+    var refreshSignal by remember { mutableIntStateOf(0) }
     val scheme = MaterialTheme.colorScheme
 
-    suspend fun reload() {
-        error = null
-        try {
-            live = container.api.summary("LIVE")
-            paper = runCatching { container.api.summary("PAPER") }.getOrNull()
-            positions = container.api.positions("LIVE")
-            orders = runCatching { container.api.orders("LIVE") }.getOrDefault(emptyList())
+    // Stable poller: do not key on open position count (that cancelled mid-reload and
+    // "CoroutineScope left the composition" when Exception swallowed CancellationException).
+    LaunchedEffect(refreshSignal) {
+        while (true) {
+            error = null
             try {
-                wallet = container.api.wallet()
-                walletErr = null
+                live = container.api.summary("LIVE")
+                paper = runCatching { container.api.summary("PAPER") }.getOrNull()
+                positions = container.api.positions("LIVE")
+                orders = runCatching { container.api.orders("LIVE") }.getOrDefault(emptyList())
+                try {
+                    wallet = container.api.wallet()
+                    walletErr = null
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    wallet = null
+                    walletErr = e.message ?: "Wallet unavailable"
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                wallet = null
-                walletErr = e.message ?: "Wallet unavailable"
+                error = e.message ?: "Failed to load dashboard"
+            } finally {
+                initialLoading = false
+                refreshing = false
             }
-        } catch (e: Exception) {
-            error = e.message ?: "Failed to load dashboard"
-        } finally {
-            initialLoading = false
-            refreshing = false
-        }
-    }
-
-    val openLive = positions.count { it.status.equals("OPEN", ignoreCase = true) }
-
-    LaunchedEffect(openLive) {
-        reload()
-        val ms = if (openLive > 0) 2_000L else 12_000L
-        while (isActive) {
-            delay(ms)
-            reload()
+            val openCount = positions.count { it.status.equals("OPEN", ignoreCase = true) }
+            delay(if (openCount > 0) 2_000L else 12_000L)
         }
     }
 
@@ -115,7 +113,10 @@ fun DashboardScreen(
         HeroHeader("Dashboard", "LIVE wallet · positions · orders")
         PullRefreshColumn(
             refreshing = refreshing,
-            onRefresh = { scope.launch { refreshing = true; reload() } },
+            onRefresh = {
+                refreshing = true
+                refreshSignal++
+            },
             initialLoading = initialLoading,
             error = error,
         ) {

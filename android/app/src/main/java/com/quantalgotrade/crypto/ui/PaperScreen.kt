@@ -48,6 +48,8 @@ fun PaperScreen(
         error = null
         try {
             positions = container.api.positions("PAPER")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Failed to load paper"
         } finally {

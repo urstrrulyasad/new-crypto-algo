@@ -52,6 +52,8 @@ fun StrategiesScreen(
         try {
             strategies = container.api.strategies("FUTURES")
                 .filter { it.status !in setOf("REJECTED", "ARCHIVED") }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Failed to load strategies"
         } finally {

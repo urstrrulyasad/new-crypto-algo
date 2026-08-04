@@ -50,6 +50,8 @@ fun CoinsScreen(
             val strategies = container.api.strategies("FUTURES")
             byCoin = strategies.groupBy { it.instrument ?: "—" }
             coins = (instruments + byCoin.keys).distinct().sorted()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: "Failed to load coins"
         } finally {

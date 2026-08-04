@@ -149,6 +149,8 @@ fun ChartScreen(
                 lines = overlay
                 activePos = pos
                 error = null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (candles.isEmpty()) {
                     error = e.message ?: "Failed to load chart"
