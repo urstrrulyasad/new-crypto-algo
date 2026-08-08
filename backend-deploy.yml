@@ -1,38 +1,65 @@
 name: Deploy Backend
 
 on:
+  workflow_dispatch:
+
   push:
     branches:
-      - main
-
+      - master
     paths:
       - "backend/**"
-      - "docker-compose.gcp.yml"
+      - ".github/workflows/backend-deploy.yml"
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
-
   deploy:
-
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Deploy Backend
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-        uses: appleboy/ssh-action@v1
+      - name: Build and Push Backend Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/urstrrulyasad/new-crypto-algo/backend:latest
+            ghcr.io/urstrrulyasad/new-crypto-algo/backend:${{ github.sha }}
 
+      - name: Deploy Backend to EC2
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-
           script: |
-            cd /home/ubuntu/cryptoalgo
+            set -e
 
-            git pull origin main
+            cd /home/ubuntu/crypto-algo
+
+            export BACKEND_IMAGE_TAG=${{ github.sha }}
 
             docker compose \
               -f docker-compose.gcp.yml \
               --env-file .env.gcp \
-              up -d --build backend
+              pull backend
+
+            docker compose \
+              -f docker-compose.gcp.yml \
+              --env-file .env.gcp \
+              up -d backend
+
+            docker image prune -f
