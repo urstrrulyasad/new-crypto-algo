@@ -10,7 +10,7 @@ on:
       - "docker-compose.gcp.yml"
 
 jobs:
-#
+
   deploy:
 
     runs-on: ubuntu-latest
