@@ -102,11 +102,9 @@ public class PaperEvaluationService {
             return Mono.just(new ApproveLiveResult(false, "strategy not in PAPER_TRADING", null));
         }
         return paperStats.forStrategy(strategy.id()).flatMap(stats ->
-                backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
-                                strategy.tenantId(), strategy.id())
-                        .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
-                        .next()
+                backtests.findLatestDoneWithMetrics(strategy.tenantId(), strategy.id())
                         .flatMap(bt -> {
+
                             JsonNode metrics = readMetrics(bt.metrics());
                             if (!pipeline.passesLiveBacktestQuality(metrics)) {
                                 return Mono.just(new ApproveLiveResult(false,
@@ -189,12 +187,10 @@ public class PaperEvaluationService {
             if (failsPaperWinRateGate(stats)) {
                 return rejectLowPaperWinRate(strategy, stats);
             }
-            return backtests.findByTenantIdAndStrategyIdOrderByCreatedAtDesc(
-                            strategy.tenantId(), strategy.id())
-                    .filter(b -> "DONE".equals(b.status()) && b.metrics() != null)
-                    .next()
+            return backtests.findLatestDoneWithMetrics(strategy.tenantId(), strategy.id())
                     .flatMap(bt -> {
                         JsonNode metrics = readMetrics(bt.metrics());
+
                         if (!pipeline.passesLiveBacktestQuality(metrics)) {
                             // Paper WR OK but BT cannot support LIVE — keep paper, do not purge.
                             if (badBacktestLogged.add(strategy.id())) {

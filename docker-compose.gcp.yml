@@ -1,13 +1,13 @@
-# GCP VM deploy: backend + strategy-engine against Supabase (no local Postgres/frontend).
-# Usage on the VM:
-#   cp .env.gcp.example .env.gcp   # fill secrets
-#   docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --build
+# EC2 deploy: backend + strategy-engine against Supabase (no local Postgres/frontend).
+# Images are built and pushed to GHCR by GitHub Actions; the VM only pulls them.
+# GHCR_OWNER, BACKEND_TAG and STRATEGY_ENGINE_TAG are written into .env.gcp by the
+# deploy workflows (SHA-pinned). Usage on the VM (normally run by CI):
+#   docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --no-build
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.runtime
+    image: ghcr.io/${GHCR_OWNER}/cryptoalgo-backend:${BACKEND_TAG:-latest}
     restart: unless-stopped
+
     environment:
       JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xmx384m -Xms128m}
       DB_HOST: ${DB_HOST}
@@ -29,8 +29,9 @@ services:
       - "8080:8080"
 
   strategy-engine:
-    build: ./strategy-engine
+    image: ghcr.io/${GHCR_OWNER}/cryptoalgo-strategy-engine:${STRATEGY_ENGINE_TAG:-latest}
     restart: unless-stopped
+
     environment:
       INTERNAL_TOKEN: ${INTERNAL_TOKEN}
       BACKEND_URL: http://backend:8080
