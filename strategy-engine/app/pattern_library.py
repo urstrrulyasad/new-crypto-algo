@@ -21,9 +21,11 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.014
-    minimal_roi = {"0": 0.012, "30": 0.006}
+    # Reward:risk ~1.54:1 — target must exceed stop for positive expectancy.
+    stoploss = -0.013
+    minimal_roi = {"0": 0.02, "30": 0.01}
     can_short = True
+
 
     def populate_indicators(self, df):
         df = df.copy()
@@ -55,9 +57,10 @@ class Strategy:
 ''',
         "config": {
             "timeframe": "5m",
-            "stoploss": -0.014,
-            "minimal_roi": {"0": 0.012, "30": 0.006},
+            "stoploss": -0.013,
+            "minimal_roi": {"0": 0.02, "30": 0.01},
             "can_short": True,
+
         },
     },
     {
@@ -71,13 +74,15 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.02
-    minimal_roi = {"0": 0.016, "60": 0.008}
+    # Reward:risk ~1.54:1.
+    stoploss = -0.013
+    minimal_roi = {"0": 0.02, "60": 0.01}
     can_short = True
 
     def populate_indicators(self, df):
         df = df.copy()
         df["ema_fast"] = ta.trend.EMAIndicator(df["close"], window=12).ema_indicator()
+
         df["ema_slow"] = ta.trend.EMAIndicator(df["close"], window=48).ema_indicator()
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         return df
@@ -100,9 +105,10 @@ class Strategy:
 ''',
         "config": {
             "timeframe": "5m",
-            "stoploss": -0.02,
-            "minimal_roi": {"0": 0.016, "60": 0.008},
+            "stoploss": -0.013,
+            "minimal_roi": {"0": 0.02, "60": 0.01},
             "can_short": True,
+
         },
     },
     {
@@ -116,9 +122,11 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.022
-    minimal_roi = {"0": 0.02, "90": 0.01}
+    # Reward:risk ~1.5:1 — breakouts use a wider stop, so target scales up too.
+    stoploss = -0.02
+    minimal_roi = {"0": 0.03, "90": 0.015}
     can_short = True
+
 
     def populate_indicators(self, df):
         df = df.copy()
@@ -145,9 +153,10 @@ class Strategy:
 ''',
         "config": {
             "timeframe": "5m",
-            "stoploss": -0.022,
-            "minimal_roi": {"0": 0.02, "90": 0.01},
+            "stoploss": -0.02,
+            "minimal_roi": {"0": 0.03, "90": 0.015},
             "can_short": True,
+
         },
     },
     {
@@ -161,9 +170,11 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.02
-    minimal_roi = {"0": 0.015, "75": 0.008}
+    # Reward:risk ~1.57:1.
+    stoploss = -0.014
+    minimal_roi = {"0": 0.022, "75": 0.011}
     can_short = True
+
 
     def populate_indicators(self, df):
         df = df.copy()
@@ -188,9 +199,10 @@ class Strategy:
 ''',
         "config": {
             "timeframe": "5m",
-            "stoploss": -0.02,
-            "minimal_roi": {"0": 0.015, "75": 0.008},
+            "stoploss": -0.014,
+            "minimal_roi": {"0": 0.022, "75": 0.011},
             "can_short": True,
+
         },
     },
     {
@@ -204,9 +216,11 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.02
-    minimal_roi = {"0": 0.015, "60": 0.007}
+    # Reward:risk ~1.57:1.
+    stoploss = -0.014
+    minimal_roi = {"0": 0.022, "60": 0.011}
     can_short = True
+
 
     def populate_indicators(self, df):
         df = df.copy()
@@ -233,9 +247,10 @@ class Strategy:
 ''',
         "config": {
             "timeframe": "5m",
-            "stoploss": -0.02,
-            "minimal_roi": {"0": 0.015, "60": 0.007},
+            "stoploss": -0.014,
+            "minimal_roi": {"0": 0.022, "60": 0.011},
             "can_short": True,
+
         },
     },
 ]

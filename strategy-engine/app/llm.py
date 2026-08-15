@@ -40,9 +40,13 @@ Generate a Python trading strategy class with EXACTLY this contract (freqtrade-s
   prioritize POSITIVE expectancy over raw signal count.
   Require selective entries (filters + confirmation), not constant flipping.
   Prefer RSI mean-reversion with BB/EMA confirmation, or EMA trend with
-  pullback entries. Keep stoploss tight (≤5%). Target win_rate ≥55% and
-  profit_factor > 1. Always set both long and short entry rules when can_short
+  pullback entries. Keep stoploss tight (≤5%). Set minimal_roi["0"] to at least
+  1.5× the stoploss magnitude so the first target clears round-trip taker fees
+  (~0.15%) with positive expectancy (e.g. stoploss -0.014 with minimal_roi
+  {"0": 0.022}); never let the target sit below the stop. Target win_rate ≥55%
+  and profit_factor > 1. Always set both long and short entry rules when can_short
   is true. Avoid strategies that overtrade every candle.
+
 
 Respond with ONLY a JSON object: {"source_code": "<python code>", "config": {"timeframe": "...", "stoploss": ..., "minimal_roi": {...}, "can_short": true}, "explanation": "<one paragraph>"}"""
 

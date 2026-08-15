@@ -34,7 +34,15 @@ import java.util.UUID;
 @RequestMapping("/api/v1/portfolio")
 public class PortfolioController {
 
+    /**
+     * Cap on concurrent per-row market-data enrichment. The dashboard enriches every open
+     * position/order with a mark price; running these in parallel (instead of one-at-a-time)
+     * cuts wall-clock latency while staying well under CoinDCX rate limits.
+     */
+    private static final int ENRICH_CONCURRENCY = 8;
+
     private final PositionRepository positions;
+
     private final TradeOrderRepository orders;
     private final BotRepository bots;
     private final ExchangeKeyRepository keys;
@@ -61,10 +69,13 @@ public class PortfolioController {
                                     p.tenantId(), p.userId())
                             .filter(pos -> ids.contains(pos.botId()));
                     if (!"LIVE".equals(m)) {
-                        return rows.concatMap(this::enrichPosition);
+                        // flatMapSequential: enrich pairs in parallel, preserve openedAt-desc order.
+                        return rows.flatMapSequential(this::enrichPosition, ENRICH_CONCURRENCY);
                     }
                     return liveExchangeByPair(p).flatMapMany(ex ->
-                            rows.concatMap(pos -> enrichLivePosition(pos, ex.get(pos.pair()))));
+                            rows.flatMapSequential(pos -> enrichLivePosition(pos, ex.get(pos.pair())),
+                                    ENRICH_CONCURRENCY));
+
                 }));
     }
 
@@ -83,7 +94,9 @@ public class PortfolioController {
                                         .collectList(),
                                 settleRateForDisplay(p, m)
                         ).flatMapMany(t -> Flux.fromIterable(t.getT1())
-                                .concatMap(o -> enrichOrder(o, t.getT2(), t.getT3())))));
+                                .flatMapSequential(o -> enrichOrder(o, t.getT2(), t.getT3()),
+                                        ENRICH_CONCURRENCY))));
+
     }
 
     /** CoinDCX INR order size uses settlement rate (~102), not spot USDTINR ticker. */
@@ -424,10 +437,12 @@ public class PortfolioController {
         Counts c = counts(filtered);
         return Flux.fromIterable(filtered)
                 .filter(pos -> "OPEN".equals(pos.status()))
-                .concatMap(pos -> futures.lastPrice(pos.pair())
+                // Sum is order-independent, so fetch marks in parallel (bounded).
+                .flatMap(pos -> futures.lastPrice(pos.pair())
                         .flatMap(mark -> futures.pnlInr(pos.entryPrice(), mark, pos.quantity(), pos.side()))
-                        .defaultIfEmpty(BigDecimal.ZERO))
+                        .defaultIfEmpty(BigDecimal.ZERO), ENRICH_CONCURRENCY)
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
+
                 .map(unrealized -> summaryMap(mode, c, unrealized));
     }
 

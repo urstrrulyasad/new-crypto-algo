@@ -47,6 +47,10 @@ public class ExecutionService {
     /** SL limit price sits 0.3% under the stop trigger so the limit fills. */
     private static final BigDecimal SL_LIMIT_SLIP = new BigDecimal("0.997");
 
+    /** Round-trip taker fee (~0.075% per side) — mirrors backtest FEE_RATE. */
+    private static final BigDecimal TAKER_FEE_RATE = new BigDecimal("0.00075");
+
+
     record Risk(BigDecimal stoploss, BigDecimal targetRoi) {}
 
     private final BotRepository bots;
@@ -277,15 +281,26 @@ public class ExecutionService {
         // INR-margined futures: PnL = USDT move × qty × side × USDTINR (no leverage factor).
         boolean inrMargin = pos.marginCurrency() == null
                 || "INR".equalsIgnoreCase(pos.marginCurrency());
+        // Round-trip taker fee on the actual notional (entry + exit legs), in USDT terms.
+        // Paper PnL used to be gross, so the LIVE-promotion gate rewarded fee-free
+        // profits that evaporate once real 0.075%×2 costs apply. Net it out here so
+        // paper realized_pnl matches the fee-aware backtest.
+        BigDecimal feeUsdt = pos.entryPrice().add(exitPrice)
+                .multiply(pos.quantity())
+                .multiply(TAKER_FEE_RATE);
         Mono<BigDecimal> pnlMono = inrMargin
-                ? futuresClient.pnlInr(pos.entryPrice(), exitPrice, pos.quantity(), pos.side())
+                ? Mono.zip(
+                        futuresClient.pnlInr(pos.entryPrice(), exitPrice, pos.quantity(), pos.side()),
+                        futuresClient.usdtInrRate())
+                    .map(t -> t.getT1().subtract(feeUsdt.multiply(t.getT2())))
                 : Mono.just(CoinDcxFuturesClient.pnlUsdt(
-                        pos.entryPrice(), exitPrice, pos.quantity(), pos.side()));
+                        pos.entryPrice(), exitPrice, pos.quantity(), pos.side()).subtract(feeUsdt));
         return pnlMono.flatMap(pnl -> {
             Position closed = new Position(pos.id(), pos.tenantId(), pos.userId(), pos.botId(), pos.pair(),
                     pos.side(), pos.quantity(), pos.entryPrice(), exitPrice, pos.leverage(), "CLOSED",
                     pnl, pos.slPrice(), pos.targetPrice(), pos.slOrderId(), pos.marginCurrency(),
                     pos.openedAt(), Instant.now());
+
             return positions.save(closed).then();
         });
     }

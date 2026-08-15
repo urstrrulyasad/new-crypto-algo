@@ -24,12 +24,17 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 
 /**
  * CoinDCX INR-margined futures: public instruments/candles + signed orders/balances.
- * Candles are fetched on demand with no caching.
+ * Hot public reads (usdtInrRate, lastPrice) use short-TTL caches so the mobile dashboard's
+ * many endpoints don't each re-fetch identical market data; signed/private calls are never cached.
  */
 @Component
+
 public class CoinDcxFuturesClient {
 
     private static final Logger log = LoggerFactory.getLogger(CoinDcxFuturesClient.class);
@@ -52,15 +57,34 @@ public class CoinDcxFuturesClient {
         }
     }
 
+    /**
+     * Short TTL for hot public reads. The dashboard fans out to several endpoints that each
+     * need the same USDTINR rate and per-pair marks; a few seconds of sharing collapses the
+     * duplicate upstream calls without making displayed marks meaningfully stale (1m candles).
+     */
+    private static final Duration RATE_TTL = Duration.ofSeconds(5);
+    private static final Duration PRICE_TTL = Duration.ofSeconds(3);
+
     private final WebClient api;
     private final WebClient publicApi;
     private final ObjectMapper mapper;
+
+    /** Single shared USDTINR rate; refreshes on first subscribe after each TTL window. */
+    private final Mono<BigDecimal> usdtInrRateCached;
+    /** Per-pair last-price cache. Bounded by the number of distinct traded pairs. */
+    private final Map<String, Mono<BigDecimal>> lastPriceCache = new ConcurrentHashMap<>();
 
     public CoinDcxFuturesClient(WebClient.Builder builder, AppProperties props, ObjectMapper mapper) {
         this.api = builder.clone().baseUrl(props.coindcx().apiBase()).build();
         this.publicApi = builder.clone().baseUrl(props.coindcx().publicBase()).build();
         this.mapper = mapper;
+        // Built here (not as a field initializer) because it depends on `api`, which is
+        // assigned above in this constructor body. Cache successes only — never errors/empties —
+        // so a transient ticker failure recovers on the very next call.
+        this.usdtInrRateCached = usdtInrRateUncached()
+                .cache(v -> RATE_TTL, e -> Duration.ZERO, () -> Duration.ZERO);
     }
+
 
     public Mono<List<String>> activeInstruments(String marginCurrency) {
         return api.get()
@@ -252,9 +276,15 @@ public class CoinDcxFuturesClient {
 
     /**
      * Spot USDT→INR rate for sizing INR-margined futures (notional is USDT-quoted).
+     * Shared via a short-TTL cache so a dashboard's many endpoints reuse one upstream call.
      */
     public Mono<BigDecimal> usdtInrRate() {
+        return usdtInrRateCached;
+    }
+
+    private Mono<BigDecimal> usdtInrRateUncached() {
         return api.get().uri("/exchange/ticker")
+
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .timeout(Duration.ofSeconds(15))
@@ -463,12 +493,23 @@ public class CoinDcxFuturesClient {
      * Live CoinDCX futures mark/last via latest candle close.
      * Tries 1m (15m window) then 5m — empty only if both fail.
      * Callers must fail closed (no invented price).
+     * <p>Shared per-pair via a short-TTL cache so a dashboard load with N positions doesn't
+     * refetch the same pair's candles across summary/positions/orders/wallet.
      */
     public Mono<BigDecimal> lastPrice(String pair) {
+        return lastPriceCache.computeIfAbsent(pair, p ->
+                // defer so each TTL refresh recomputes the Instant.now() window instead of
+                // freezing the first window; cache successes only so empties/errors retry.
+                Mono.defer(() -> lastPriceUncached(p))
+                        .cache(v -> PRICE_TTL, e -> Duration.ZERO, () -> Duration.ZERO));
+    }
+
+    private Mono<BigDecimal> lastPriceUncached(String pair) {
         Instant to = Instant.now();
         return candleClose(pair, "1", to.minus(Duration.ofMinutes(15)), to)
                 .switchIfEmpty(candleClose(pair, "5", to.minus(Duration.ofHours(2)), to));
     }
+
 
     private Mono<BigDecimal> candleClose(String pair, String resolution, Instant from, Instant to) {
         return candles(pair, resolution, from, to)

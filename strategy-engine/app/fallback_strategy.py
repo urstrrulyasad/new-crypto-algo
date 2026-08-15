@@ -11,14 +11,17 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.016
-    minimal_roi = {"0": 0.012, "60": 0.006}
+    # Reward:risk ~1.54:1 (target 2.0% vs stop 1.3%) — positive expectancy
+    # after fees is reachable; the old 1.2%:1.6% was net-negative by design.
+    stoploss = -0.013
+    minimal_roi = {"0": 0.02, "60": 0.012}
     can_short = True
 
     def populate_indicators(self, df):
         df = df.copy()
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2.6)
+
         df["bb_low"] = bb.bollinger_lband()
         df["bb_mid"] = bb.bollinger_mavg()
         df["bb_high"] = bb.bollinger_hband()
@@ -50,12 +53,13 @@ class Strategy:
 
 FALLBACK_CONFIG = {
     "timeframe": "5m",
-    "stoploss": -0.016,
-    "minimal_roi": {"0": 0.012, "60": 0.006},
+    "stoploss": -0.013,
+    "minimal_roi": {"0": 0.02, "60": 0.012},
     "can_short": True,
     "provider_used": "TEMPLATE",
     "model_used": "rsi-bb-ema-fallback",
 }
+
 
 # Slightly looser — only if selective fails the minimum-signal smoke check.
 ACTIVE_FALLBACK_SOURCE = r'''
@@ -65,14 +69,16 @@ import ta
 
 class Strategy:
     timeframe = "5m"
-    stoploss = -0.018
-    minimal_roi = {"0": 0.014, "45": 0.007}
+    # Reward:risk ~1.5:1 (target 2.2% vs stop 1.5%).
+    stoploss = -0.015
+    minimal_roi = {"0": 0.022, "45": 0.012}
     can_short = True
 
     def populate_indicators(self, df):
         df = df.copy()
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2.4)
+
         df["bb_low"] = bb.bollinger_lband()
         df["bb_mid"] = bb.bollinger_mavg()
         df["bb_high"] = bb.bollinger_hband()
@@ -103,9 +109,11 @@ class Strategy:
 
 ACTIVE_FALLBACK_CONFIG = {
     "timeframe": "5m",
-    "stoploss": -0.018,
-    "minimal_roi": {"0": 0.014, "45": 0.007},
+    "stoploss": -0.015,
+    "minimal_roi": {"0": 0.022, "45": 0.012},
     "can_short": True,
     "provider_used": "TEMPLATE",
     "model_used": "rsi-bb-active-fallback",
 }
+
+
