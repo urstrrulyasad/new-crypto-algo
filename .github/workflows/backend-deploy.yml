@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,103 +25,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      # The JAR is built ONLY here on the runner. EC2 never runs Maven.
-      - name: Build backend JAR
-        working-directory: backend
-        run: |
-          chmod +x mvnw
-          ./mvnw -q -B package -DskipTests
+      - name: Build and Push Backend Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/urstrrulyasad/new-crypto-algo/backend:latest
+            ghcr.io/urstrrulyasad/new-crypto-algo/backend:${{ github.sha }}
 
-      # GHCR image names must be lowercase; owner is derived, never hardcoded.
-      - name: Compute image name
-        id: img
-        run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "owner=$owner" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/$owner/cryptoalgo-backend" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to GHCR (runner)
-        run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      # The Docker image is built ONLY here on the runner. Context is ./backend
-      # so Dockerfile.runtime's `COPY target/backend-*.jar` finds the jar built above.
-      - name: Build and push backend image
-        run: |
-          IMAGE="${{ steps.img.outputs.image }}"
-          docker build -f backend/Dockerfile.runtime \
-            -t "$IMAGE:${{ github.sha }}" \
-            -t "$IMAGE:latest" \
-            backend
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
-
-      # Ship only the Compose config (no source, no jar) so EC2 has the exact
-      # deployment definition without needing a git checkout.
-      - name: Copy Compose file to EC2
-        uses: appleboy/scp-action@v0.1.7
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          source: "docker-compose.gcp.yml"
-          target: "/home/ubuntu/cryptoalgo"
-
-      - name: Deploy on EC2 (pull + up)
-        uses: appleboy/ssh-action@v1
-        env:
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          GHCR_USER: ${{ github.actor }}
-          GHCR_OWNER: ${{ steps.img.outputs.owner }}
-          IMAGE_TAG: ${{ github.sha }}
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
           script: |
             set -e
-            cd /home/ubuntu/cryptoalgo
 
-            # Token arrives via env (never printed) and is piped into docker login.
-            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            cd /home/ubuntu/crypto-algo
 
-            # Persist deploy vars for Compose interpolation (idempotent upsert),
-            # without touching any existing application config in .env.gcp.
-            upsert() {
-              key="$1"; val="$2"; f=.env.gcp
-              touch "$f"
-              if grep -q "^${key}=" "$f"; then
-                sed -i "s|^${key}=.*|${key}=${val}|" "$f"
-              else
-                echo "${key}=${val}" >> "$f"
-              fi
-            }
-            upsert GHCR_OWNER "$GHCR_OWNER"
-            upsert BACKEND_TAG "$IMAGE_TAG"
+            export BACKEND_IMAGE_TAG=${{ github.sha }}
 
-            IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-backend:$IMAGE_TAG"
-            docker pull "$IMAGE"
+            docker compose \
+              -f docker-compose.gcp.yml \
+              --env-file .env.gcp \
+              pull backend
 
-            # No build on EC2: image-only service, recreate just backend.
-            docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --no-build --no-deps backend
-            docker compose -f docker-compose.gcp.yml --env-file .env.gcp ps
+            docker compose \
+              -f docker-compose.gcp.yml \
+              --env-file .env.gcp \
+              up -d backend
 
-            # Fail the deploy unless the backend container is running the exact image.
-            cid=$(docker compose -f docker-compose.gcp.yml --env-file .env.gcp ps -q backend)
-            if [ -z "$cid" ]; then echo "backend container not found"; exit 1; fi
-            running=$(docker inspect "$cid" --format '{{.State.Running}}')
-            deployed=$(docker inspect "$cid" --format '{{.Config.Image}}')
-            echo "backend running=$running image=$deployed"
-            [ "$running" = "true" ]
-            [ "$deployed" = "$IMAGE" ]
-
-            docker logout ghcr.io || true
-            # Reclaim disk from dangling images; keeps the running image.
             docker image prune -f
