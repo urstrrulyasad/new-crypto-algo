@@ -24,22 +24,14 @@ jobs:
       packages: write
 
     steps:
-
-      # ---------------------------------------------------------
-      # Checkout
-      # ---------------------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-
-      # ---------------------------------------------------------
-      # Calculate GHCR image name
-      # ---------------------------------------------------------
       - name: Compute Image Details
         id: image
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER}/cryptoalgo-backend"
@@ -47,13 +39,6 @@ jobs:
           echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
-          echo "GHCR Owner: ${OWNER}"
-          echo "GHCR Image: ${IMAGE}"
-
-
-      # ---------------------------------------------------------
-      # Login to GHCR
-      # ---------------------------------------------------------
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -61,10 +46,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-
-      # ---------------------------------------------------------
-      # Build and push backend image
-      # ---------------------------------------------------------
       - name: Build and Push Backend Image
         uses: docker/build-push-action@v6
         with:
@@ -75,46 +56,37 @@ jobs:
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}
 
-
-      # ---------------------------------------------------------
-      # Prepare SSH private key
-      # ---------------------------------------------------------
       - name: Prepare SSH Key
         env:
           VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
         run: |
-          set -e
+          set -euo pipefail
+
+          if [ -z "${VM_SSH_KEY}" ]; then
+            echo "ERROR: VM_SSH_KEY is empty"
+            exit 1
+          fi
 
           printf '%s\n' "$VM_SSH_KEY" > /tmp/aws.pem
-
           chmod 600 /tmp/aws.pem
 
-          echo "Private key fingerprint:"
+          echo "SSH key fingerprint:"
           ssh-keygen -lf /tmp/aws.pem
 
-          echo ""
-          echo "Derived public key fingerprint:"
           ssh-keygen -y -f /tmp/aws.pem > /tmp/aws.pub
+
+          echo "Derived public key fingerprint:"
           ssh-keygen -lf /tmp/aws.pub
 
-          echo ""
-          echo "Key type:"
-          awk '{print $1}' /tmp/aws.pub
-
-
-      # ---------------------------------------------------------
-      # Test SSH connection
-      # ---------------------------------------------------------
       - name: Test EC2 SSH Connection
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Testing SSH connection..."
-          echo "Host: ${VM_HOST}"
-          echo "User: ${VM_USER}"
+          : "${VM_HOST:?VM_HOST is missing}"
+          : "${VM_USER:?VM_USER is missing}"
 
           ssh \
             -i /tmp/aws.pem \
@@ -125,25 +97,22 @@ jobs:
             "${VM_USER}@${VM_HOST}" \
             "echo SSH_SUCCESS && whoami && hostname && docker --version && docker compose version"
 
-
-      # ---------------------------------------------------------
-      # Deploy backend
-      # ---------------------------------------------------------
       - name: Deploy Backend to EC2
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_USER: ${{ secrets.VM_USER }}
-
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
-
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
-
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Starting EC2 deployment..."
+          : "${VM_HOST:?VM_HOST is missing}"
+          : "${VM_USER:?VM_USER is missing}"
+          : "${GHCR_PAT:?GHCR_PAT is missing}"
+          : "${GHCR_OWNER:?GHCR_OWNER is missing}"
+          : "${IMAGE_TAG:?IMAGE_TAG is missing}"
 
           ssh \
             -i /tmp/aws.pem \
@@ -155,74 +124,23 @@ jobs:
              GHCR_USER='${GHCR_USER}' \
              GHCR_OWNER='${GHCR_OWNER}' \
              IMAGE_TAG='${IMAGE_TAG}' \
-             bash -s" << 'REMOTE_SCRIPT'
+             bash -se" << 'REMOTE_SCRIPT'
 
-          set -e
-
-          # -----------------------------------------------------
-          # Deployment directory
-          # -----------------------------------------------------
+          set -euo pipefail
 
           DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
-          mkdir -p "$DEPLOY_DIR"
-
           cd "$DEPLOY_DIR"
 
-          echo "========================================"
-          echo "Deployment Directory"
-          echo "========================================"
+          test -f ".env.gcp"
+          test -f "docker-compose.gcp.yml"
 
-          pwd
-
-          echo ""
-          echo "Files:"
-          ls -la
-
-
-          # -----------------------------------------------------
-          # Validate required files
-          # -----------------------------------------------------
-
-          if [ ! -f ".env.gcp" ]; then
-            echo "ERROR: .env.gcp does not exist"
-            exit 1
-          fi
-
-          if [ ! -f "docker-compose.gcp.yml" ]; then
-            echo "ERROR: docker-compose.gcp.yml does not exist"
-            exit 1
-          fi
-
-
-          # -----------------------------------------------------
-          # Validate Docker
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Docker:"
           docker --version
-
-          echo ""
-          echo "Docker Compose:"
           docker compose version
-
-
-          # -----------------------------------------------------
-          # Login to GHCR
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Logging into GHCR..."
 
           echo "$GHCR_PAT" | docker login ghcr.io \
             -u "$GHCR_USER" \
             --password-stdin
-
-
-          # -----------------------------------------------------
-          # Update .env.gcp
-          # -----------------------------------------------------
 
           upsert() {
             KEY="$1"
@@ -236,58 +154,19 @@ jobs:
             fi
           }
 
-          echo ""
-          echo "Updating deployment variables..."
-
           upsert "GHCR_OWNER" "$GHCR_OWNER"
           upsert "BACKEND_TAG" "$IMAGE_TAG"
 
-
-          # -----------------------------------------------------
-          # Backend image
-          # -----------------------------------------------------
-
           IMAGE="ghcr.io/${GHCR_OWNER}/cryptoalgo-backend:${IMAGE_TAG}"
 
-          echo ""
-          echo "========================================"
-          echo "Backend Image"
-          echo "========================================"
-
-          echo "$IMAGE"
-
-
-          # -----------------------------------------------------
-          # Pull image
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Pulling backend image..."
+          echo "Deploying image: $IMAGE"
 
           docker pull "$IMAGE"
-
-
-          # -----------------------------------------------------
-          # Validate compose configuration
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Validating Docker Compose..."
 
           docker compose \
             -f docker-compose.gcp.yml \
             --env-file .env.gcp \
-            config > /tmp/compose-config.yml
-
-          echo "Compose configuration valid."
-
-
-          # -----------------------------------------------------
-          # Deploy backend
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Deploying backend..."
+            config > /tmp/backend-compose.yml
 
           docker compose \
             -f docker-compose.gcp.yml \
@@ -297,35 +176,7 @@ jobs:
             --no-deps \
             backend
 
-
-          # -----------------------------------------------------
-          # Wait briefly for container startup
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Waiting for backend container..."
-
-          sleep 5
-
-
-          # -----------------------------------------------------
-          # Show backend status
-          # -----------------------------------------------------
-
-          echo ""
-          echo "========================================"
-          echo "Backend Status"
-          echo "========================================"
-
-          docker compose \
-            -f docker-compose.gcp.yml \
-            --env-file .env.gcp \
-            ps backend
-
-
-          # -----------------------------------------------------
-          # Get container ID
-          # -----------------------------------------------------
+          sleep 10
 
           CID=$(docker compose \
             -f docker-compose.gcp.yml \
@@ -333,114 +184,41 @@ jobs:
             ps -q backend)
 
           if [ -z "$CID" ]; then
-            echo ""
-            echo "ERROR: Backend container was not created."
-
-            docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              logs --tail 100 backend || true
-
+            echo "ERROR: Backend container was not created"
             exit 1
           fi
 
+          RUNNING=$(docker inspect "$CID" --format '{{.State.Running}}')
+          DEPLOYED_IMAGE=$(docker inspect "$CID" --format '{{.Config.Image}}')
 
-          # -----------------------------------------------------
-          # Check container state
-          # -----------------------------------------------------
-
-          RUNNING=$(docker inspect "$CID" \
-            --format '{{.State.Running}}')
-
-          DEPLOYED_IMAGE=$(docker inspect "$CID" \
-            --format '{{.Config.Image}}')
-
-          echo ""
-          echo "Container ID:"
-          echo "$CID"
-
-          echo ""
-          echo "Running:"
-          echo "$RUNNING"
-
-          echo ""
-          echo "Deployed Image:"
-          echo "$DEPLOYED_IMAGE"
-
-
-          # -----------------------------------------------------
-          # Verify container running
-          # -----------------------------------------------------
+          echo "Running: $RUNNING"
+          echo "Image: $DEPLOYED_IMAGE"
 
           if [ "$RUNNING" != "true" ]; then
-
-            echo ""
-            echo "ERROR: Backend container is not running."
-
-            echo ""
-            echo "Backend logs:"
-            
-            docker logs "$CID" --tail 150 || true
-
+            echo "ERROR: Backend container is not running"
+            docker logs "$CID" --tail 200 || true
             exit 1
           fi
-
-
-          # -----------------------------------------------------
-          # Verify correct image
-          # -----------------------------------------------------
 
           if [ "$DEPLOYED_IMAGE" != "$IMAGE" ]; then
-
-            echo ""
-            echo "ERROR: Wrong backend image deployed."
-
-            echo "Expected:"
-            echo "$IMAGE"
-
-            echo "Actual:"
-            echo "$DEPLOYED_IMAGE"
-
+            echo "ERROR: Wrong backend image deployed"
+            echo "Expected: $IMAGE"
+            echo "Actual:   $DEPLOYED_IMAGE"
             exit 1
           fi
 
-
-          # -----------------------------------------------------
-          # Deployment successful
-          # -----------------------------------------------------
-
-          echo ""
-          echo "========================================"
-          echo "BACKEND DEPLOYMENT SUCCESSFUL"
-          echo "========================================"
-
-          echo ""
-          echo "Image:"
-          echo "$DEPLOYED_IMAGE"
-
-
-          # -----------------------------------------------------
-          # Cleanup old images
-          # -----------------------------------------------------
-
-          echo ""
-          echo "Cleaning unused Docker images..."
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            ps backend
 
           docker image prune -f
-
-
-          # -----------------------------------------------------
-          # Logout GHCR
-          # -----------------------------------------------------
-
           docker logout ghcr.io || true
+
+          echo "BACKEND DEPLOYMENT SUCCESSFUL"
 
           REMOTE_SCRIPT
 
-
-      # ---------------------------------------------------------
-      # Cleanup private key
-      # ---------------------------------------------------------
       - name: Cleanup SSH Key
         if: always()
         run: |
