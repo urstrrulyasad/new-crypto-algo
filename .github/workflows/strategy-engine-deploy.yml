@@ -42,7 +42,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and Push Strategy Engine Image
         uses: docker/build-push-action@v6
@@ -61,6 +61,7 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
+
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
@@ -77,8 +78,6 @@ jobs:
 
             mkdir -p "$DEPLOY_DIR"
             cd "$DEPLOY_DIR"
-
-            echo "Logging in to GHCR..."
 
             echo "$GHCR_PAT" | docker login ghcr.io \
               -u "$GHCR_USER" \
@@ -103,8 +102,6 @@ jobs:
 
             IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-strategy-engine:$IMAGE_TAG"
 
-            echo "Pulling: $IMAGE"
-
             docker pull "$IMAGE"
 
             docker compose \
@@ -121,5 +118,4 @@ jobs:
               ps strategy-engine
 
             docker image prune -f
-
             docker logout ghcr.io || true
