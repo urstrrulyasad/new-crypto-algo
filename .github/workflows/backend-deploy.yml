@@ -24,10 +24,8 @@ jobs:
       packages: write
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
-
 
       - name: Compute Image Details
         id: image
@@ -39,14 +37,12 @@ jobs:
           echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
-
 
       - name: Build and Push Backend Image
         uses: docker/build-push-action@v6
@@ -58,152 +54,172 @@ jobs:
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}
 
+      - name: Prepare and Validate SSH Key
+        env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+        run: |
+          set -e
+
+          printf '%s\n' "$VM_SSH_KEY" > /tmp/aws.pem
+          chmod 600 /tmp/aws.pem
+
+          echo "SSH key fingerprint from GitHub secret:"
+          ssh-keygen -lf /tmp/aws.pem
+
+          echo "Expected fingerprint:"
+          echo "SHA256:Cn18+QjpsWiEBP/apehWctXFTi4eeHX7i7CioZ0+ibQ"
 
       - name: Test EC2 SSH Connection
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 1m
-          script: |
-            echo "SSH connection successful"
-            whoami
-            hostname
-            docker --version
-            docker compose version
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          set -e
 
+          ssh \
+            -i /tmp/aws.pem \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=20 \
+            "$VM_USER@$VM_HOST" \
+            "echo SSH_SUCCESS && whoami && hostname && docker --version && docker compose version"
 
       - name: Deploy Backend to EC2
-        uses: appleboy/ssh-action@v1.2.2
-
         env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
 
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 15m
+          ssh \
+            -i /tmp/aws.pem \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o IdentitiesOnly=yes \
+            "$VM_USER@$VM_HOST" \
+            "GHCR_PAT='$GHCR_PAT' \
+             GHCR_USER='$GHCR_USER' \
+             GHCR_OWNER='$GHCR_OWNER' \
+             IMAGE_TAG='$IMAGE_TAG' \
+             bash -s" << 'EOF'
 
-          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
+          set -e
 
-          script: |
-            set -e
+          DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
-            DEPLOY_DIR="/home/ubuntu/crypto-algo"
+          mkdir -p "$DEPLOY_DIR"
 
-            mkdir -p "$DEPLOY_DIR"
+          cd "$DEPLOY_DIR"
 
-            cd "$DEPLOY_DIR"
+          echo "Current directory:"
+          pwd
 
-            echo "Current directory:"
-            pwd
+          echo "Checking deployment files:"
+          ls -la
 
-            echo "Checking deployment files:"
-            ls -la
+          if [ ! -f ".env.gcp" ]; then
+            echo "ERROR: .env.gcp not found"
+            exit 1
+          fi
 
-            if [ ! -f ".env.gcp" ]; then
-              echo "ERROR: .env.gcp not found"
-              exit 1
+          if [ ! -f "docker-compose.gcp.yml" ]; then
+            echo "ERROR: docker-compose.gcp.yml not found"
+            exit 1
+          fi
+
+          echo "Logging into GHCR..."
+
+          echo "$GHCR_PAT" | docker login ghcr.io \
+            -u "$GHCR_USER" \
+            --password-stdin
+
+          upsert() {
+            key="$1"
+            value="$2"
+            file=".env.gcp"
+
+            if grep -q "^${key}=" "$file"; then
+              sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+            else
+              echo "${key}=${value}" >> "$file"
             fi
+          }
 
-            if [ ! -f "docker-compose.gcp.yml" ]; then
-              echo "ERROR: docker-compose.gcp.yml not found"
-              exit 1
-            fi
+          echo "Updating deployment variables..."
 
-            echo "Logging into GHCR..."
+          upsert "GHCR_OWNER" "$GHCR_OWNER"
+          upsert "BACKEND_TAG" "$IMAGE_TAG"
 
-            echo "$GHCR_PAT" | docker login ghcr.io \
-              -u "$GHCR_USER" \
-              --password-stdin
+          IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-backend:$IMAGE_TAG"
 
-            upsert() {
-              key="$1"
-              value="$2"
-              file=".env.gcp"
+          echo "Deploying image: $IMAGE"
 
-              if grep -q "^${key}=" "$file"; then
-                sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-              else
-                echo "${key}=${value}" >> "$file"
-              fi
-            }
+          echo "Pulling backend image..."
 
-            echo "Updating deployment variables..."
+          docker pull "$IMAGE"
 
-            upsert "GHCR_OWNER" "$GHCR_OWNER"
-            upsert "BACKEND_TAG" "$IMAGE_TAG"
+          echo "Starting backend..."
 
-            IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-backend:$IMAGE_TAG"
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            up -d \
+            --no-build \
+            --no-deps \
+            backend
 
-            echo "Deploying image:"
-            echo "$IMAGE"
+          echo "Backend container status:"
 
-            echo "Pulling backend image..."
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            ps backend
 
-            docker pull "$IMAGE"
+          CID=$(docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            ps -q backend)
 
-            echo "Starting backend..."
+          if [ -z "$CID" ]; then
+            echo "ERROR: Backend container was not created"
+            exit 1
+          fi
 
-            docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              up -d \
-              --no-build \
-              --no-deps \
-              backend
+          RUNNING=$(docker inspect "$CID" \
+            --format '{{.State.Running}}')
 
-            echo "Backend container status:"
+          DEPLOYED_IMAGE=$(docker inspect "$CID" \
+            --format '{{.Config.Image}}')
 
-            docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              ps backend
+          echo "Container ID: $CID"
+          echo "Running: $RUNNING"
+          echo "Image: $DEPLOYED_IMAGE"
 
-            CID=$(docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              ps -q backend)
+          if [ "$RUNNING" != "true" ]; then
+            echo "ERROR: Backend container is not running"
+            docker logs "$CID" --tail 100 || true
+            exit 1
+          fi
 
-            if [ -z "$CID" ]; then
-              echo "ERROR: Backend container was not created"
-              exit 1
-            fi
+          if [ "$DEPLOYED_IMAGE" != "$IMAGE" ]; then
+            echo "ERROR: Wrong backend image deployed"
+            exit 1
+          fi
 
-            RUNNING=$(docker inspect "$CID" \
-              --format '{{.State.Running}}')
+          echo "Backend deployment successful"
 
-            DEPLOYED_IMAGE=$(docker inspect "$CID" \
-              --format '{{.Config.Image}}')
+          docker image prune -f
 
-            echo "Container ID: $CID"
-            echo "Running: $RUNNING"
-            echo "Image: $DEPLOYED_IMAGE"
+          docker logout ghcr.io || true
 
-            if [ "$RUNNING" != "true" ]; then
-              echo "ERROR: Backend container is not running"
+          EOF
 
-              docker logs "$CID" --tail 100 || true
-
-              exit 1
-            fi
-
-            if [ "$DEPLOYED_IMAGE" != "$IMAGE" ]; then
-              echo "ERROR: Wrong backend image deployed"
-              exit 1
-            fi
-
-            echo "Backend deployment successful"
-
-            docker image prune -f
-
-            docker logout ghcr.io || true
+      - name: Cleanup SSH Key
+        if: always()
+        run: |
+          rm -f /tmp/aws.pem
