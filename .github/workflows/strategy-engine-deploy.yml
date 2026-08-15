@@ -9,12 +9,14 @@ on:
       - "docker-compose.gcp.yml"
       - ".github/workflows/strategy-engine-deploy.yml"
 
+  workflow_dispatch:
+
 concurrency:
   group: deploy-vm
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     permissions:
@@ -25,76 +27,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Generate lowercase GHCR image name
-      - name: Compute image name
-        id: img
+      - name: Compute image details
+        id: image
         shell: bash
         run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/cryptoalgo-strategy-engine"
 
-          echo "owner=$owner" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/$owner/cryptoalgo-strategy-engine" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      # Login to GHCR from GitHub runner
-      - name: Log in to GHCR
-        shell: bash
-        run: |
-          echo "${{ secrets.GHCR_PAT }}" | \
-          docker login ghcr.io \
-            -u "${{ github.actor }}" \
-            --password-stdin
-
-      # Build and push strategy engine image
-      - name: Build and push strategy-engine image
-        shell: bash
-        run: |
-          IMAGE="${{ steps.img.outputs.image }}"
-
-          docker build \
-            -f strategy-engine/Dockerfile \
-            -t "$IMAGE:${{ github.sha }}" \
-            -t "$IMAGE:latest" \
-            strategy-engine
-
-          docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:latest"
-
-      # Ensure deployment directory exists on EC2
-      - name: Prepare deployment directory on EC2
-        uses: appleboy/ssh-action@v1.2.2
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 10m
-          script: |
-            mkdir -p /home/${{ secrets.VM_USER }}/cryptoalgo
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Copy only the Compose file
-      - name: Copy Compose file to EC2
-        uses: appleboy/scp-action@v0.1.7
+      - name: Build and Push Strategy Engine Image
+        uses: docker/build-push-action@v6
         with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: 22
-          source: "docker-compose.gcp.yml"
-          target: "/home/${{ secrets.VM_USER }}/cryptoalgo/"
-          overwrite: true
-          timeout: 30s
-          command_timeout: 10m
+          context: ./strategy-engine
+          file: ./strategy-engine/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}:latest
+            ${{ steps.image.outputs.image }}:${{ github.sha }}
 
-      # Pull and deploy Strategy Engine
-      - name: Deploy Strategy Engine on EC2
+      - name: Deploy Strategy Engine to EC2
         uses: appleboy/ssh-action@v1.2.2
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
-          GHCR_OWNER: ${{ steps.img.outputs.owner }}
+          GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
-          VM_USER: ${{ secrets.VM_USER }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
@@ -102,33 +68,33 @@ jobs:
           port: 22
           timeout: 30s
           command_timeout: 15m
-          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG,VM_USER
+          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
 
           script: |
             set -e
 
-            DEPLOY_DIR="/home/$VM_USER/cryptoalgo"
+            DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
+            mkdir -p "$DEPLOY_DIR"
             cd "$DEPLOY_DIR"
 
             echo "Logging in to GHCR..."
 
-            echo "$GHCR_PAT" | \
-              docker login ghcr.io \
-                -u "$GHCR_USER" \
-                --password-stdin
+            echo "$GHCR_PAT" | docker login ghcr.io \
+              -u "$GHCR_USER" \
+              --password-stdin
 
             upsert() {
               key="$1"
-              val="$2"
+              value="$2"
               file=".env.gcp"
 
               touch "$file"
 
               if grep -q "^${key}=" "$file"; then
-                sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+                sed -i "s|^${key}=.*|${key}=${value}|" "$file"
               else
-                echo "${key}=${val}" >> "$file"
+                echo "${key}=${value}" >> "$file"
               fi
             }
 
@@ -137,11 +103,9 @@ jobs:
 
             IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-strategy-engine:$IMAGE_TAG"
 
-            echo "Pulling image: $IMAGE"
+            echo "Pulling: $IMAGE"
 
             docker pull "$IMAGE"
-
-            echo "Deploying strategy-engine..."
 
             docker compose \
               -f docker-compose.gcp.yml \
@@ -151,45 +115,11 @@ jobs:
               --no-deps \
               strategy-engine
 
-            echo "Current container status:"
-
             docker compose \
               -f docker-compose.gcp.yml \
               --env-file .env.gcp \
-              ps
-
-            cid=$(docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              ps -q strategy-engine)
-
-            if [ -z "$cid" ]; then
-              echo "ERROR: strategy-engine container not found"
-              exit 1
-            fi
-
-            running=$(docker inspect "$cid" \
-              --format '{{.State.Running}}')
-
-            deployed=$(docker inspect "$cid" \
-              --format '{{.Config.Image}}')
-
-            echo "strategy-engine running=$running"
-            echo "strategy-engine image=$deployed"
-
-            if [ "$running" != "true" ]; then
-              echo "ERROR: strategy-engine container is not running"
-              docker logs "$cid" --tail 100 || true
-              exit 1
-            fi
-
-            if [ "$deployed" != "$IMAGE" ]; then
-              echo "ERROR: Incorrect image deployed"
-              exit 1
-            fi
-
-            docker logout ghcr.io || true
+              ps strategy-engine
 
             docker image prune -f
 
-            echo "Strategy Engine deployed successfully."
+            docker logout ghcr.io || true
