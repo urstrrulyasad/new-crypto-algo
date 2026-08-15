@@ -9,8 +9,8 @@ on:
       - "docker-compose.gcp.yml"
       - ".github/workflows/backend-deploy.yml"
 
-# Backend and strategy-engine deploy to the same EC2 host and share .env.gcp,
-# so their deploy jobs must never run at the same time.
+  workflow_dispatch:
+
 concurrency:
   group: deploy-vm
   cancel-in-progress: false
@@ -18,12 +18,24 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute image details
+        id: image
+        shell: bash
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/cryptoalgo-backend"
+
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -39,30 +51,75 @@ jobs:
           file: ./backend/Dockerfile
           push: true
           tags: |
-            ghcr.io/urstrrulyasad/new-crypto-algo/backend:latest
-            ghcr.io/urstrrulyasad/new-crypto-algo/backend:${{ github.sha }}
+            ${{ steps.image.outputs.image }}:latest
+            ${{ steps.image.outputs.image }}:${{ github.sha }}
 
-      - name: Deploy to EC2
+      - name: Deploy Backend to EC2
         uses: appleboy/ssh-action@v1.2.2
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_OWNER: ${{ steps.image.outputs.owner }}
+          IMAGE_TAG: ${{ github.sha }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          port: 22
+          timeout: 30s
+          command_timeout: 15m
+          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
+
           script: |
             set -e
 
-            cd /home/ubuntu/crypto-algo
+            DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
-            export BACKEND_IMAGE_TAG=${{ github.sha }}
+            mkdir -p "$DEPLOY_DIR"
+            cd "$DEPLOY_DIR"
+
+            echo "Logging in to GHCR..."
+
+            echo "$GHCR_PAT" | docker login ghcr.io \
+              -u "$GHCR_USER" \
+              --password-stdin
+
+            upsert() {
+              key="$1"
+              value="$2"
+              file=".env.gcp"
+
+              touch "$file"
+
+              if grep -q "^${key}=" "$file"; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+              else
+                echo "${key}=${value}" >> "$file"
+              fi
+            }
+
+            upsert "GHCR_OWNER" "$GHCR_OWNER"
+            upsert "BACKEND_TAG" "$IMAGE_TAG"
+
+            IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-backend:$IMAGE_TAG"
+
+            echo "Pulling: $IMAGE"
+
+            docker pull "$IMAGE"
 
             docker compose \
               -f docker-compose.gcp.yml \
               --env-file .env.gcp \
-              pull backend
+              up -d \
+              --no-build \
+              --no-deps \
+              backend
 
             docker compose \
               -f docker-compose.gcp.yml \
               --env-file .env.gcp \
-              up -d backend
+              ps backend
 
             docker image prune -f
+
+            docker logout ghcr.io || true
