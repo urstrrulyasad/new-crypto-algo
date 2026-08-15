@@ -24,18 +24,20 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Compute image details
+      - name: Compute Image Details
         id: image
         shell: bash
         run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/$OWNER/cryptoalgo-strategy-engine"
+          set -euo pipefail
 
-          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER}/cryptoalgo-strategy-engine"
+
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -54,68 +56,171 @@ jobs:
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}
 
-      - name: Deploy Strategy Engine to EC2
-        uses: appleboy/ssh-action@v1.2.2
+      - name: Prepare SSH Key
         env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VM_SSH_KEY}" ]; then
+            echo "ERROR: VM_SSH_KEY is empty"
+            exit 1
+          fi
+
+          printf '%s\n' "$VM_SSH_KEY" > /tmp/aws.pem
+          chmod 600 /tmp/aws.pem
+
+          echo "SSH key fingerprint:"
+          ssh-keygen -lf /tmp/aws.pem
+
+          ssh-keygen -y -f /tmp/aws.pem > /tmp/aws.pub
+
+          echo "Derived public key fingerprint:"
+          ssh-keygen -lf /tmp/aws.pub
+
+      - name: Test EC2 SSH Connection
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+        run: |
+          set -euo pipefail
+
+          : "${VM_HOST:?VM_HOST is missing}"
+          : "${VM_USER:?VM_USER is missing}"
+
+          ssh \
+            -i /tmp/aws.pem \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            "${VM_USER}@${VM_HOST}" \
+            "echo SSH_SUCCESS && whoami && hostname && docker --version && docker compose version"
+
+      - name: Deploy Strategy Engine to EC2
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
 
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 15m
-          envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
+          : "${VM_HOST:?VM_HOST is missing}"
+          : "${VM_USER:?VM_USER is missing}"
+          : "${GHCR_PAT:?GHCR_PAT is missing}"
+          : "${GHCR_OWNER:?GHCR_OWNER is missing}"
+          : "${IMAGE_TAG:?IMAGE_TAG is missing}"
 
-          script: |
-            set -e
+          ssh \
+            -i /tmp/aws.pem \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "${VM_USER}@${VM_HOST}" \
+            "GHCR_PAT='${GHCR_PAT}' \
+             GHCR_USER='${GHCR_USER}' \
+             GHCR_OWNER='${GHCR_OWNER}' \
+             IMAGE_TAG='${IMAGE_TAG}' \
+             bash -se" << 'REMOTE_SCRIPT'
 
-            DEPLOY_DIR="/home/ubuntu/crypto-algo"
+          set -euo pipefail
 
-            mkdir -p "$DEPLOY_DIR"
-            cd "$DEPLOY_DIR"
+          DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
-            echo "$GHCR_PAT" | docker login ghcr.io \
-              -u "$GHCR_USER" \
-              --password-stdin
+          cd "$DEPLOY_DIR"
 
-            upsert() {
-              key="$1"
-              value="$2"
-              file=".env.gcp"
+          test -f ".env.gcp"
+          test -f "docker-compose.gcp.yml"
 
-              touch "$file"
+          docker --version
+          docker compose version
 
-              if grep -q "^${key}=" "$file"; then
-                sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-              else
-                echo "${key}=${value}" >> "$file"
-              fi
-            }
+          echo "$GHCR_PAT" | docker login ghcr.io \
+            -u "$GHCR_USER" \
+            --password-stdin
 
-            upsert "GHCR_OWNER" "$GHCR_OWNER"
-            upsert "STRATEGY_ENGINE_TAG" "$IMAGE_TAG"
+          upsert() {
+            KEY="$1"
+            VALUE="$2"
+            FILE=".env.gcp"
 
-            IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-strategy-engine:$IMAGE_TAG"
+            if grep -q "^${KEY}=" "$FILE"; then
+              sed -i "s|^${KEY}=.*|${KEY}=${VALUE}|" "$FILE"
+            else
+              echo "${KEY}=${VALUE}" >> "$FILE"
+            fi
+          }
 
-            docker pull "$IMAGE"
+          upsert "GHCR_OWNER" "$GHCR_OWNER"
+          upsert "STRATEGY_ENGINE_TAG" "$IMAGE_TAG"
 
-            docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              up -d \
-              --no-build \
-              --no-deps \
-              strategy-engine
+          IMAGE="ghcr.io/${GHCR_OWNER}/cryptoalgo-strategy-engine:${IMAGE_TAG}"
 
-            docker compose \
-              -f docker-compose.gcp.yml \
-              --env-file .env.gcp \
-              ps strategy-engine
+          echo "Deploying image: $IMAGE"
 
-            docker image prune -f
-            docker logout ghcr.io || true
+          docker pull "$IMAGE"
+
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            config > /tmp/strategy-compose.yml
+
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            up -d \
+            --no-build \
+            --no-deps \
+            strategy-engine
+
+          sleep 10
+
+          CID=$(docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            ps -q strategy-engine)
+
+          if [ -z "$CID" ]; then
+            echo "ERROR: Strategy Engine container was not created"
+            exit 1
+          fi
+
+          RUNNING=$(docker inspect "$CID" --format '{{.State.Running}}')
+          DEPLOYED_IMAGE=$(docker inspect "$CID" --format '{{.Config.Image}}')
+
+          echo "Running: $RUNNING"
+          echo "Image: $DEPLOYED_IMAGE"
+
+          if [ "$RUNNING" != "true" ]; then
+            echo "ERROR: Strategy Engine container is not running"
+            docker logs "$CID" --tail 200 || true
+            exit 1
+          fi
+
+          if [ "$DEPLOYED_IMAGE" != "$IMAGE" ]; then
+            echo "ERROR: Wrong Strategy Engine image deployed"
+            echo "Expected: $IMAGE"
+            echo "Actual:   $DEPLOYED_IMAGE"
+            exit 1
+          fi
+
+          docker compose \
+            -f docker-compose.gcp.yml \
+            --env-file .env.gcp \
+            ps strategy-engine
+
+          docker image prune -f
+          docker logout ghcr.io || true
+
+          echo "STRATEGY ENGINE DEPLOYMENT SUCCESSFUL"
+
+          REMOTE_SCRIPT
+
+      - name: Cleanup SSH Key
+        if: always()
+        run: |
+          rm -f /tmp/aws.pem
+          rm -f /tmp/aws.pub
