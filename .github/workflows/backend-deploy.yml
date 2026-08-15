@@ -24,10 +24,12 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout repository
+
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Compute image details
+
+      - name: Compute Image Details
         id: image
         shell: bash
         run: |
@@ -37,12 +39,14 @@ jobs:
           echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
+
 
       - name: Build and Push Backend Image
         uses: docker/build-push-action@v6
@@ -54,13 +58,33 @@ jobs:
             ${{ steps.image.outputs.image }}:latest
             ${{ steps.image.outputs.image }}:${{ github.sha }}
 
+
+      - name: Test EC2 SSH Connection
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: 22
+          timeout: 30s
+          command_timeout: 1m
+          script: |
+            echo "SSH connection successful"
+            whoami
+            hostname
+            docker --version
+            docker compose version
+
+
       - name: Deploy Backend to EC2
         uses: appleboy/ssh-action@v1.2.2
+
         env:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ steps.image.outputs.owner }}
           IMAGE_TAG: ${{ github.sha }}
+
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
@@ -68,6 +92,7 @@ jobs:
           port: 22
           timeout: 30s
           command_timeout: 15m
+
           envs: GHCR_PAT,GHCR_USER,GHCR_OWNER,IMAGE_TAG
 
           script: |
@@ -76,9 +101,26 @@ jobs:
             DEPLOY_DIR="/home/ubuntu/crypto-algo"
 
             mkdir -p "$DEPLOY_DIR"
+
             cd "$DEPLOY_DIR"
 
-            echo "Logging in to GHCR..."
+            echo "Current directory:"
+            pwd
+
+            echo "Checking deployment files:"
+            ls -la
+
+            if [ ! -f ".env.gcp" ]; then
+              echo "ERROR: .env.gcp not found"
+              exit 1
+            fi
+
+            if [ ! -f "docker-compose.gcp.yml" ]; then
+              echo "ERROR: docker-compose.gcp.yml not found"
+              exit 1
+            fi
+
+            echo "Logging into GHCR..."
 
             echo "$GHCR_PAT" | docker login ghcr.io \
               -u "$GHCR_USER" \
@@ -89,8 +131,6 @@ jobs:
               value="$2"
               file=".env.gcp"
 
-              touch "$file"
-
               if grep -q "^${key}=" "$file"; then
                 sed -i "s|^${key}=.*|${key}=${value}|" "$file"
               else
@@ -98,14 +138,21 @@ jobs:
               fi
             }
 
+            echo "Updating deployment variables..."
+
             upsert "GHCR_OWNER" "$GHCR_OWNER"
             upsert "BACKEND_TAG" "$IMAGE_TAG"
 
             IMAGE="ghcr.io/$GHCR_OWNER/cryptoalgo-backend:$IMAGE_TAG"
 
-            echo "Pulling: $IMAGE"
+            echo "Deploying image:"
+            echo "$IMAGE"
+
+            echo "Pulling backend image..."
 
             docker pull "$IMAGE"
+
+            echo "Starting backend..."
 
             docker compose \
               -f docker-compose.gcp.yml \
@@ -115,10 +162,47 @@ jobs:
               --no-deps \
               backend
 
+            echo "Backend container status:"
+
             docker compose \
               -f docker-compose.gcp.yml \
               --env-file .env.gcp \
               ps backend
+
+            CID=$(docker compose \
+              -f docker-compose.gcp.yml \
+              --env-file .env.gcp \
+              ps -q backend)
+
+            if [ -z "$CID" ]; then
+              echo "ERROR: Backend container was not created"
+              exit 1
+            fi
+
+            RUNNING=$(docker inspect "$CID" \
+              --format '{{.State.Running}}')
+
+            DEPLOYED_IMAGE=$(docker inspect "$CID" \
+              --format '{{.Config.Image}}')
+
+            echo "Container ID: $CID"
+            echo "Running: $RUNNING"
+            echo "Image: $DEPLOYED_IMAGE"
+
+            if [ "$RUNNING" != "true" ]; then
+              echo "ERROR: Backend container is not running"
+
+              docker logs "$CID" --tail 100 || true
+
+              exit 1
+            fi
+
+            if [ "$DEPLOYED_IMAGE" != "$IMAGE" ]; then
+              echo "ERROR: Wrong backend image deployed"
+              exit 1
+            fi
+
+            echo "Backend deployment successful"
 
             docker image prune -f
 
