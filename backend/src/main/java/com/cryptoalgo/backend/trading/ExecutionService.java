@@ -302,7 +302,6 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
         }
         return target ? (comparison >= 0 ? existing : added) : (comparison <= 0 ? existing : added);
     }
-    }
 
     /** Close a paper position at the given price (signal exit, SL or target). */
     Mono<Void> closePaperPosition(Bot bot, Position pos, BigDecimal price,
