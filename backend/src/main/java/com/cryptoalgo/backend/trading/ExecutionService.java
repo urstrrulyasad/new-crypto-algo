@@ -26,6 +26,8 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 
@@ -266,8 +268,10 @@ public class ExecutionService {
                                                    BigDecimal addedQty, BigDecimal fillPrice,
                                                    BigDecimal addedSl, BigDecimal addedTarget,
                                                    BigDecimal leverage, String marginCurrency) {
-        return positions.findByTenantIdAndUserIdAndBotIdAndPairAndSideAndStatus(
-                        bot.tenantId(), bot.userId(), bot.id(), pair, side, "OPEN")
+Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOffset.UTC);
+        Instant dayEnd = dayStart.plusSeconds(86_400);
+        return positions.findOpenPositionForUtcDay(
+                bot.tenantId(), bot.userId(), bot.id(), pair, side, "OPEN", dayStart, dayEnd)
                 .flatMap(existing -> {
                     BigDecimal totalQty = existing.quantity().add(addedQty);
                     BigDecimal average = existing.entryPrice().multiply(existing.quantity())
