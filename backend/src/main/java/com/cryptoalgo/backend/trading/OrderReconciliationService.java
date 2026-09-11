@@ -14,12 +14,14 @@ import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Polls CoinDCX for OPEN + PENDING_RECONCILE LIVE orders and settles them. */
 @Service
 public class OrderReconciliationService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderReconciliationService.class);
+    private final AtomicBoolean reconcileInFlight = new AtomicBoolean();
 
     private final TradeOrderRepository orders;
     private final BotRepository bots;
@@ -44,13 +46,19 @@ public class OrderReconciliationService {
 
     @Scheduled(fixedDelayString = "${app.reconcile-ms:15000}")
     public void reconcile() {
+        if (!reconcileInFlight.compareAndSet(false, true)) {
+            log.debug("Skipping reconciliation because the previous cycle is still running");
+            return;
+        }
         Flux.merge(
                         orders.findByStatusAndModeOrderByCreatedAtAsc("OPEN", "LIVE"),
                         orders.findByStatusAndModeOrderByCreatedAtAsc("PENDING_RECONCILE", "LIVE"),
                         orders.findByStatusAndModeOrderByCreatedAtAsc("UNKNOWN", "LIVE"),
                         orders.findByStatusAndModeOrderByCreatedAtAsc("SUBMITTING", "LIVE")
                 )
+                .distinct(TradeOrder::id)
                 .flatMap(this::refreshOrder, 4)
+                .doFinally(signal -> reconcileInFlight.set(false))
                 .subscribe(o -> {}, e -> log.error("Reconciliation cycle failed", e));
     }
 

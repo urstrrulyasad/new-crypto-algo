@@ -11,6 +11,7 @@ import reactor.core.publisher.Sinks;
 import java.math.BigDecimal;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Live prices: polls the CoinDCX ticker (generated once per second upstream)
@@ -28,6 +29,7 @@ public class TickerService {
     private final CoinDcxPublicClient client;
     private final Map<String, Tick> lastTicks = new ConcurrentHashMap<>();
     private final Sinks.Many<Tick> sink = Sinks.many().multicast().onBackpressureBuffer(4096, false);
+    private final AtomicBoolean pollInFlight = new AtomicBoolean();
 
     public TickerService(CoinDcxPublicClient client) {
         this.client = client;
@@ -35,8 +37,13 @@ public class TickerService {
 
     @Scheduled(fixedDelayString = "${app.ticker-poll-ms:3000}")
     public void poll() {
-        client.ticker().subscribe(this::ingest,
-                e -> log.warn("Ticker poll failed: {}", e.getMessage()));
+        if (!pollInFlight.compareAndSet(false, true)) {
+            log.debug("Skipping ticker poll because the previous request is still running");
+            return;
+        }
+        client.ticker().doFinally(signal -> pollInFlight.set(false))
+                .subscribe(this::ingest,
+                        e -> log.warn("Ticker poll failed: {}", e.getMessage()));
     }
 
     private void ingest(JsonNode array) {

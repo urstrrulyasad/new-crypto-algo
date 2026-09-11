@@ -15,6 +15,7 @@ import reactor.core.scheduler.Schedulers;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Watches every OPEN position against live market price.
@@ -33,6 +34,7 @@ public class PositionGuardService {
 
     /** Paper positions older than this are force-closed at mark (signal starvation). */
     private static final Duration PAPER_MAX_HOLD = Duration.ofHours(2);
+    private final AtomicBoolean guardInFlight = new AtomicBoolean();
 
     private final PositionRepository positions;
     private final BotRepository bots;
@@ -60,6 +62,10 @@ public class PositionGuardService {
 
     @Scheduled(fixedDelayString = "${app.guard-ms:5000}")
     public void guard() {
+        if (!guardInFlight.compareAndSet(false, true)) {
+            log.debug("Skipping guard cycle because the previous cycle is still running");
+            return;
+        }
         positions.findByStatus("OPEN")
                 .collectList()
                 .flatMapMany(list -> {
@@ -73,6 +79,7 @@ public class PositionGuardService {
                     return Mono.empty();
                 }))
                 .then()
+                .doFinally(signal -> guardInFlight.set(false))
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(v -> {}, e -> log.error("Guard cycle failed", e));
     }
