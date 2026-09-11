@@ -2,6 +2,7 @@ CREATE TABLE scalper_settings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id),
     user_id UUID NOT NULL REFERENCES users(id),
+    strategy_id UUID REFERENCES strategies(id),
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     mode VARCHAR(10) NOT NULL DEFAULT 'PAPER',
     instruments JSONB NOT NULL DEFAULT '[]'::jsonb,

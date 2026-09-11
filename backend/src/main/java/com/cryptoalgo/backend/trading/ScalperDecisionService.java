@@ -53,7 +53,7 @@ public class ScalperDecisionService {
     }
 
     private reactor.core.publisher.Mono<ScalperSettings> save(ScalperSettings s, String decision, String error) {
-        return settings.save(new ScalperSettings(s.id(), s.tenantId(), s.userId(), s.enabled(), s.mode(),
+        return settings.save(new ScalperSettings(s.id(), s.tenantId(), s.userId(), s.strategyId(), s.enabled(), s.mode(),
                 s.instruments(), s.timeframe(), s.stakeAmount(), s.maxOpenTrades(), s.cooldownSeconds(),
                 s.dailyLossLimit(), s.killSwitch(), decision, error, Instant.now(), s.createdAt(), Instant.now()));
     }

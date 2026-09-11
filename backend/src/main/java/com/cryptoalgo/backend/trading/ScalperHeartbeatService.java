@@ -18,7 +18,7 @@ public class ScalperHeartbeatService {
     public void heartbeat() {
         settings.findAll()
                 .filter(s -> s.enabled() && !s.killSwitch())
-                .flatMap(s -> settings.save(new ScalperSettings(s.id(), s.tenantId(), s.userId(), s.enabled(),
+                .flatMap(s -> settings.save(new ScalperSettings(s.id(), s.tenantId(), s.userId(), s.strategyId(), s.enabled(),
                         s.mode(), s.instruments(), s.timeframe(), s.stakeAmount(), s.maxOpenTrades(),
                         s.cooldownSeconds(), s.dailyLossLimit(), s.killSwitch(), "READY", s.lastError(),
                         Instant.now(), s.createdAt(), Instant.now())))

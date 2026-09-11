@@ -16,7 +16,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1/scalper")
 public class ScalperController {
-    public record UpdateRequest(Boolean enabled, String mode, String instruments, String timeframe,
+    public record UpdateRequest(UUID strategyId, Boolean enabled, String mode, String instruments, String timeframe,
                                 BigDecimal stakeAmount, Integer maxOpenTrades, Integer cooldownSeconds,
                                 BigDecimal dailyLossLimit, Boolean killSwitch) {}
 
@@ -43,6 +43,7 @@ public class ScalperController {
                         return Mono.error(ApiException.badRequest("mode must be PAPER or LIVE"));
                     Json instruments = req.instruments() == null ? existing.instruments() : Json.of(req.instruments());
                     ScalperSettings next = new ScalperSettings(existing.id(), existing.tenantId(), existing.userId(),
+                            req.strategyId() == null ? existing.strategyId() : req.strategyId(),
                             req.enabled() == null ? existing.enabled() : req.enabled(), mode, instruments,
                             req.timeframe() == null ? existing.timeframe() : req.timeframe(),
                             req.stakeAmount() == null ? existing.stakeAmount() : req.stakeAmount(),
@@ -57,11 +58,11 @@ public class ScalperController {
 
     @PostMapping("/kill-switch")
     public Mono<ScalperSettings> kill(@RequestParam boolean enabled) {
-        return update(new UpdateRequest(false, null, null, null, null, null, null, null, enabled));
+        return update(new UpdateRequest(null, false, null, null, null, null, null, null, null, enabled));
     }
 
     private static ScalperSettings defaults(UUID tenantId, UUID userId) {
-        return new ScalperSettings(null, tenantId, userId, false, "PAPER", Json.of("[]"), "5m",
+        return new ScalperSettings(null, tenantId, userId, null, false, "PAPER", Json.of("[]"), "5m",
                 BigDecimal.ZERO, 3, 300, BigDecimal.ZERO, false, "IDLE", null, null, Instant.now(), Instant.now());
     }
 }

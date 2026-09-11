@@ -9,7 +9,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Table("scalper_settings")
-public record ScalperSettings(@Id UUID id, UUID tenantId, UUID userId, boolean enabled,
+public record ScalperSettings(@Id UUID id, UUID tenantId, UUID userId, UUID strategyId, boolean enabled,
                               String mode, Json instruments, String timeframe,
                               BigDecimal stakeAmount, int maxOpenTrades, int cooldownSeconds,
                               BigDecimal dailyLossLimit, boolean killSwitch,
