@@ -96,10 +96,10 @@ export default function FuturesPaper() {
   const open = positions.filter((p) => p.status === 'OPEN')
   const closed = positions.filter((p) => p.status !== 'OPEN')
 
-  // Automated paper: only show RUNNING bots. Hide STOPPED (incl. promoted-to-LIVE).
+  // Automated paper: only show running bots that have not already been promoted to LIVE.
   const visibleBots = useMemo(() => {
     if (!bots) return null
-    return bots.filter((b) => b.status === 'RUNNING')
+    return bots.filter((b) => b.status === 'RUNNING' && !(b.strategyId && liveStrategyIds.has(b.strategyId)))
   }, [bots, liveStrategyIds])
 
   return (
