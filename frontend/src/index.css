@@ -1,12 +1,12 @@
 @import 'tailwindcss';
 
 @theme {
-  --color-bg: #05070d;
-  --color-surface: #0a0e18;
-  --color-card: #0e1422;
-  --color-edge: #1a2336;
-  --color-accent: #22d3ee;
-  --color-accent2: #34d399;
+  --color-bg: #030405;
+  --color-surface: #080a0d;
+  --color-card: #0d1014;
+  --color-edge: #20262d;
+  --color-accent: #5eead4;
+  --color-accent2: #a3e635;
   --color-danger: #fb7185;
   --font-display: 'Space Grotesk', system-ui, sans-serif;
   --font-body: 'Outfit', system-ui, sans-serif;
@@ -31,7 +31,9 @@ html {
 }
 
 body {
-  background: var(--color-bg);
+  background:
+    radial-gradient(circle at 50% -20%, rgba(45, 212, 191, 0.09), transparent 34rem),
+    var(--color-bg);
   color: #e2e8f0;
   font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
@@ -80,12 +82,9 @@ body {
 }
 
 .glass {
-  background: linear-gradient(
-    155deg,
-    rgba(16, 22, 36, 0.92) 0%,
-    rgba(10, 14, 24, 0.78) 100%
-  );
-  border: 1px solid rgba(148, 163, 184, 0.1);
+  position: relative;
+  background: linear-gradient(145deg, rgba(17, 21, 25, 0.92), rgba(7, 9, 11, 0.86));
+  border: 1px solid rgba(148, 163, 184, 0.12);
   backdrop-filter: blur(16px) saturate(1.2);
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.02) inset,
@@ -99,11 +98,27 @@ body {
     transform 0.25s var(--ease-out-expo);
 }
 .glass-hover:hover {
-  border-color: rgba(34, 211, 238, 0.35);
+  border-color: rgba(94, 234, 212, 0.4);
   box-shadow:
-    0 0 0 1px rgba(34, 211, 238, 0.08) inset,
-    0 16px 48px -18px rgba(34, 211, 238, 0.18),
-    0 12px 40px -20px rgba(0, 0, 0, 0.55);
+    0 0 0 1px rgba(94, 234, 212, 0.08) inset,
+    0 18px 50px -18px rgba(45, 212, 191, 0.18),
+    0 12px 40px -20px rgba(0, 0, 0, 0.8);
+  transform: translateY(-2px);
+}
+
+.glow-line {
+  background: linear-gradient(90deg, transparent, rgba(94, 234, 212, 0.8), rgba(163, 230, 53, 0.65), transparent);
+  box-shadow: 0 0 24px rgba(94, 234, 212, 0.4);
+}
+
+.pulse-dot {
+  box-shadow: 0 0 0 0 rgba(163, 230, 53, 0.5);
+  animation: pulse-dot 2s ease-out infinite;
+}
+
+@keyframes pulse-dot {
+  70% { box-shadow: 0 0 0 7px rgba(163, 230, 53, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(163, 230, 53, 0); }
 }
 
 .orb {

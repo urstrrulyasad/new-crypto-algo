@@ -34,7 +34,7 @@ export function Card({
       viewport={{ once: true, margin: '-40px' }}
       whileHover={hover ? { y: -2 } : undefined}
       transition={{ duration: 0.5, delay, ease }}
-      className={`glass rounded-2xl p-5 ${hover ? 'glass-hover' : ''} ${className}`}
+      className={`glass group rounded-2xl p-5 ${hover ? 'glass-hover' : ''} ${className}`}
     >
       {children}
     </motion.div>
@@ -95,7 +95,8 @@ export function Stat({
   const color = accent === 'up' ? 'text-emerald-400' : accent === 'down' ? 'text-rose-400' : 'text-slate-100'
   return (
     <Card delay={delay} className="min-w-0 relative overflow-hidden">
-      <div className="pointer-events-none absolute -right-6 -top-6 h-20 w-20 rounded-full bg-cyan-500/10 blur-2xl" />
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full bg-teal-400/10 blur-2xl transition-transform duration-700 group-hover:scale-150" />
+      <div className="pointer-events-none absolute inset-x-6 top-0 h-px -translate-y-px opacity-0 transition-opacity duration-500 group-hover:opacity-100 glow-line" />
       <div className="text-[11px] uppercase tracking-widest text-slate-400">{label}</div>
       <motion.div
         key={String(value)}
