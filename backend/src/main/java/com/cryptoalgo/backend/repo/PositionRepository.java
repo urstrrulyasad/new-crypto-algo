@@ -11,6 +11,11 @@ public interface PositionRepository extends ReactiveCrudRepository<Position, UUI
     Flux<Position> findByTenantIdAndUserIdOrderByOpenedAtDesc(UUID tenantId, UUID userId);
     Flux<Position> findByBotIdAndStatus(UUID botId, String status);
     Flux<Position> findByBotIdOrderByOpenedAtDesc(UUID botId);
+    Mono<Position> findByTenantIdAndUserIdAndBotIdAndPairAndSideAndStatus(
+            UUID tenantId, UUID userId, UUID botId, String pair, String side, String status);
+
+    Mono<Position> findByBotIdAndPairAndSideAndStatus(UUID botId, String pair, String side, String status);
+
     Mono<Position> findByBotIdAndPairAndStatus(UUID botId, String pair, String status);
     Mono<Long> countByBotIdAndStatus(UUID botId, String status);
     Flux<Position> findByStatus(String status);

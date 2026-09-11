@@ -159,12 +159,13 @@ public class ExecutionService {
             log.info("Bot {} skipped LIVE entry on catchup signal {}", bot.id(), signal.id());
             return Mono.empty();
         }
-        return positions.countByBotIdAndStatus(bot.id(), "OPEN")
-                .filter(open -> open < bot.maxOpenTrades())
-                .flatMap(open -> positions.findByBotIdAndPairAndStatus(bot.id(), signal.pair(), "OPEN")
-                        .hasElement()
-                        .filter(hasOpen -> !hasOpen)
-                        .flatMap(x -> resolveFillPrice(bot, signal)
+        return positions.findByBotIdAndPairAndSideAndStatus(bot.id(), signal.pair(), side, "OPEN")
+                .hasElement()
+                .flatMap(hasSameSide -> hasSameSide
+                        ? Mono.just(0L)
+                        : positions.countByBotIdAndStatus(bot.id(), "OPEN"))
+                .filter(open -> open == 0L || open < bot.maxOpenTrades())
+                .flatMap(open -> resolveFillPrice(bot, signal)
                                 .flatMap(price -> {
                                     BigDecimal slPrice;
                                     BigDecimal targetPrice;
@@ -250,16 +251,53 @@ public class ExecutionService {
                 signal.id(), null, "paper-" + UUID.randomUUID(), signal.pair(), orderSide,
                 "MARKET_ORDER", bot.marketType(), "PAPER", "FILLED", price, qty, qty, price,
                 BigDecimal.ZERO, null, Instant.now(), Instant.now());
-        Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(), bot.id(),
-                signal.pair(), posSide, qty, price, null, bot.leverage(), "OPEN", null,
-                slPrice, targetPrice, null, bot.marginCurrency() == null ? "INR" : bot.marginCurrency(),
-                Instant.now(), null);
-        return template.insert(order).then(template.insert(pos))
-                .then(audit.record(bot.tenantId(), bot.userId(), "PAPER_ENTRY", "POSITION", pos.id(),
-                        Map.of("pair", signal.pair(), "qty", qty.toPlainString(),
-                                "price", price.toPlainString(), "sl", slPrice.toPlainString(),
-                                "target", targetPrice.toPlainString())))
-                .then();
+        return template.insert(order)
+                .then(aggregateOpenPosition(bot, signal.pair(), posSide, qty, price,
+                        slPrice, targetPrice, bot.leverage(),
+                        bot.marginCurrency() == null ? "INR" : bot.marginCurrency())
+                        .flatMap(pos -> audit.record(bot.tenantId(), bot.userId(), "PAPER_ENTRY", "POSITION", pos.id(),
+                                Map.of("pair", signal.pair(), "qty", qty.toPlainString(),
+                                        "price", price.toPlainString(), "sl", slPrice.toPlainString(),
+                                        "target", targetPrice.toPlainString())))
+                        .then());
+    }
+
+    private Mono<Position> aggregateOpenPosition(Bot bot, String pair, String side,
+                                                   BigDecimal addedQty, BigDecimal fillPrice,
+                                                   BigDecimal addedSl, BigDecimal addedTarget,
+                                                   BigDecimal leverage, String marginCurrency) {
+        return positions.findByTenantIdAndUserIdAndBotIdAndPairAndSideAndStatus(
+                        bot.tenantId(), bot.userId(), bot.id(), pair, side, "OPEN")
+                .flatMap(existing -> {
+                    BigDecimal totalQty = existing.quantity().add(addedQty);
+                    BigDecimal average = existing.entryPrice().multiply(existing.quantity())
+                            .add(fillPrice.multiply(addedQty))
+                            .divide(totalQty, 10, RoundingMode.HALF_UP);
+                    BigDecimal sl = conservativeLevel(existing.slPrice(), addedSl, side, false);
+                    BigDecimal target = conservativeLevel(existing.targetPrice(), addedTarget, side, true);
+                    Position merged = new Position(existing.id(), existing.tenantId(), existing.userId(),
+                            existing.botId(), existing.pair(), existing.side(), totalQty, average,
+                            existing.exitPrice(), leverage == null ? existing.leverage() : leverage,
+                            existing.status(), existing.realizedPnl(), sl, target, existing.slOrderId(),
+                            marginCurrency, existing.openedAt(), existing.closedAt());
+                    return positions.save(merged);
+                })
+                .switchIfEmpty(Mono.defer(() -> positions.save(new Position(UUID.randomUUID(),
+                        bot.tenantId(), bot.userId(), bot.id(), pair, side, addedQty, fillPrice, null,
+                        leverage, "OPEN", null, addedSl, addedTarget, null, marginCurrency,
+                        Instant.now(), null))));
+    }
+
+    private static BigDecimal conservativeLevel(BigDecimal existing, BigDecimal added,
+                                                 String side, boolean target) {
+        if (existing == null) return added;
+        if (added == null) return existing;
+        int comparison = existing.compareTo(added);
+        if ("LONG".equals(side)) {
+            return target ? (comparison <= 0 ? existing : added) : (comparison >= 0 ? existing : added);
+        }
+        return target ? (comparison >= 0 ? existing : added) : (comparison <= 0 ? existing : added);
+    }
     }
 
     /** Close a paper position at the given price (signal exit, SL or target). */
@@ -546,10 +584,6 @@ public class ExecutionService {
                                                BigDecimal slPrice, BigDecimal targetPrice,
                                                LiveFuturesSizingService.SizeResult sized,
                                                String clientOrderId, UUID orderId, String exchangeId) {
-        Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(),
-                bot.id(), pair, posSide, sized.qty(), mark, null, bot.leverage(),
-                "OPEN", null, slPrice, targetPrice, null, margin,
-                Instant.now(), null);
         var update = template.getDatabaseClient().sql("""
                         UPDATE orders SET exchange_order_id = :eid, status = 'OPEN',
                           filled_qty = :fq, avg_price = :ap, updated_at = :now
@@ -562,10 +596,11 @@ public class ExecutionService {
                 .bind("id", orderId)
                 .fetch().rowsUpdated();
         return update
-                .then(template.insert(pos))
-                .then(riskGate.release(bot.tenantId(), sized.marginInr()))
-                .then(armProtection(bot, pos))
-                .then(audit.record(bot.tenantId(), bot.userId(),
+                .then(aggregateOpenPosition(bot, pair, posSide, sized.qty(), mark,
+                        slPrice, targetPrice, bot.leverage(), margin))
+                .flatMap(pos -> riskGate.release(bot.tenantId(), sized.marginInr())
+                        .then(armProtection(bot, pos))
+                        .then(audit.record(bot.tenantId(), bot.userId(),
                         "LIVE_FUTURES_ORDER", "ORDER", orderId,
                         Map.of("pair", pair, "side", side,
                                 "qty", sized.qty().toPlainString(),
@@ -701,12 +736,10 @@ public class ExecutionService {
                     var o = resp.path("orders").path(0);
                     TradeOrder order = orderFromExchange(bot, signal.id(), o, clientOrderId,
                             signal.pair(), "BUY", "MARKET_ORDER", price, qty);
-                    Position pos = new Position(UUID.randomUUID(), bot.tenantId(), bot.userId(),
-                            bot.id(), signal.pair(), posSide, qty, price, null, bot.leverage(),
-                            "OPEN", null, slPrice, targetPrice, null, bot.marginCurrency(),
-                            Instant.now(), null);
-                    return template.insert(order).then(template.insert(pos))
-                            .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_ORDER_PLACED",
+                    return template.insert(order)
+                            .then(aggregateOpenPosition(bot, signal.pair(), posSide, qty, price,
+                                    slPrice, targetPrice, bot.leverage(), bot.marginCurrency()))
+                            .flatMap(pos -> audit.record(bot.tenantId(), bot.userId(), "LIVE_ORDER_PLACED",
                                     "ORDER", order.id(), Map.of(
                                             "pair", signal.pair(),
                                             "market", market,
@@ -715,7 +748,7 @@ public class ExecutionService {
                                             "entryPrice", price.toPlainString(),
                                             "sl", slPrice.toPlainString(),
                                             "target", targetPrice.toPlainString())))
-                            .then(placeSlLeg(bot, key, market, pos, qty, slPrice));
+                            .then(placeSlLeg(bot, key, market, pos, pos.quantity(), pos.slPrice()));
                 });
     }
 
