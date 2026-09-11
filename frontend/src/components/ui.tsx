@@ -167,12 +167,13 @@ export function Callout({
   tone = 'info',
 }: {
   children: ReactNode
-  tone?: 'info' | 'warn' | 'success'
+  tone?: 'info' | 'warn' | 'success' | 'danger'
 }) {
   const tones = {
     info: 'border-cyan-500/25 bg-cyan-500/5 text-cyan-100/90',
     warn: 'border-amber-500/30 bg-amber-500/5 text-amber-200/90',
     success: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-100/90',
+    danger: 'border-rose-500/30 bg-rose-500/5 text-rose-100/90',
   }
   return (
     <motion.div

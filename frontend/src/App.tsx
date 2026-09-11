@@ -10,6 +10,7 @@ import ChartWorkspace from '@/pages/ChartWorkspace'
 import ComingSoon from '@/pages/ComingSoon'
 import Settings from '@/pages/Settings'
 import Admin from '@/pages/Admin'
+import Scalper from '@/pages/Scalper'
 
 function Protected({ children }: { children: React.ReactNode }) {
   return hasSession() ? <>{children}</> : <Navigate to="/login" replace />
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="/futures/strategies" element={<FuturesStrategies />} />
           <Route path="/futures/paper" element={<FuturesPaper />} />
           <Route path="/futures/coins" element={<FuturesCoins />} />
+          <Route path="/futures/scalper" element={<Scalper />} />
           <Route path="/futures/chart/:pair" element={<ChartWorkspace />} />
           <Route path="/options/strategies" element={<ComingSoon title="Options Strategies" />} />
           <Route path="/options/paper" element={<ComingSoon title="Options Paper Trade" />} />

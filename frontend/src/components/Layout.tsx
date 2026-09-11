@@ -15,6 +15,7 @@ const groups: NavGroup[] = [
       { to: '/futures/strategies', label: 'Strategies' },
       { to: '/futures/paper', label: 'Paper Trade' },
       { to: '/futures/coins', label: 'Coins' },
+      { to: '/futures/scalper', label: 'Scalper' },
     ],
   },
   {
@@ -189,6 +190,7 @@ export default function Layout() {
             { to: '/', label: 'Home', end: true },
             { to: '/futures/strategies', label: 'Strategies' },
             { to: '/futures/paper', label: 'Paper' },
+            { to: '/futures/scalper', label: 'Scalper' },
             { to: '/settings', label: 'Settings' },
           ].map((item) => (
             <NavLink key={item.to} to={item.to} end={item.end} className="relative">
