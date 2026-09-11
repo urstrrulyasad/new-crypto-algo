@@ -184,7 +184,25 @@ export default function Layout() {
           )}
         </AnimatePresence>
 
-        <main className="safe-pad min-w-0 flex-1 overflow-x-hidden py-5 md:py-7 lg:py-8">
+        <nav aria-label="Mobile quick navigation" className="mobile-bottom-nav glass fixed inset-x-3 bottom-3 z-40 grid grid-cols-4 gap-1 rounded-2xl p-1.5 shadow-2xl shadow-black/50 lg:hidden">
+          {[
+            { to: '/', label: 'Home', end: true },
+            { to: '/futures/strategies', label: 'Strategies' },
+            { to: '/futures/paper', label: 'Paper' },
+            { to: '/settings', label: 'Settings' },
+          ].map((item) => (
+            <NavLink key={item.to} to={item.to} end={item.end} className="relative">
+              {({ isActive }) => (
+                <span className={`relative flex min-h-11 items-center justify-center rounded-xl px-1 text-[10px] font-semibold tracking-wide transition-colors ${isActive ? 'text-cyan-200' : 'text-slate-500'}`}>
+                  {isActive && <motion.span layoutId="mobile-nav-active" className="absolute inset-0 -z-10 rounded-xl bg-cyan-400/10 ring-1 ring-cyan-300/20" />}
+                  {item.label}
+                </span>
+              )}
+            </NavLink>
+          ))}
+        </nav>
+
+        <main className="safe-pad min-w-0 flex-1 overflow-x-hidden pb-24 pt-5 md:py-7 lg:py-8">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
@@ -247,8 +265,8 @@ function Brand({ compact = false }: { compact?: boolean }) {
         Q
       </motion.div>
       <div>
-        <div className="font-[family-name:var(--font-display)] text-lg font-bold leading-none text-slate-100">
-          Quant<span className="gradient-text">DCX</span>
+          <div className="font-[family-name:var(--font-display)] text-lg font-bold leading-none text-slate-100">
+          Asad&apos;s <span className="gradient-text">Crypto Bot</span>
         </div>
         {!compact && <div className="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-500">INR Futures</div>}
       </div>

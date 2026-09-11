@@ -68,7 +68,7 @@ export default function Login() {
             transition={{ duration: 0.5, ease }}
             className="font-[family-name:var(--font-display)] text-4xl font-bold tracking-tight text-slate-100 sm:text-5xl"
           >
-            Quant<span className="gradient-text">DCX</span>
+            Asad&apos;s <span className="gradient-text">Crypto Bot</span>
           </motion.h1>
           <motion.p
             variants={{
