@@ -2,8 +2,11 @@ package com.cryptoalgo.backend.trading;
 
 import com.cryptoalgo.backend.domain.ScalperSettings;
 import com.cryptoalgo.backend.market.CandleService;
+import com.cryptoalgo.backend.domain.Signal;
 import com.cryptoalgo.backend.repo.ScalperSettingsRepository;
+import com.cryptoalgo.backend.repo.SignalRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.r2dbc.postgresql.codec.Json;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -22,11 +25,16 @@ import java.util.List;
 public class ScalperDecisionService {
     private final ScalperSettingsRepository settings;
     private final CandleService candles;
+    private final SignalRepository signals;
+    private final ExecutionService execution;
     private final ObjectMapper mapper;
 
-    public ScalperDecisionService(ScalperSettingsRepository settings, CandleService candles, ObjectMapper mapper) {
+    public ScalperDecisionService(ScalperSettingsRepository settings, CandleService candles,
+                                  SignalRepository signals, ExecutionService execution, ObjectMapper mapper) {
         this.settings = settings;
         this.candles = candles;
+        this.signals = signals;
+        this.execution = execution;
         this.mapper = mapper;
     }
 
@@ -43,13 +51,31 @@ public class ScalperDecisionService {
         Instant to = Instant.now().minus(Duration.ofSeconds(2));
         Instant from = to.minus(Duration.ofMinutes(60));
         return Flux.fromIterable(pairs).flatMap(pair -> candles.get(pair, current.timeframe(), from, to, 120)
-                        .collectList().map(rows -> new Result(pair, decide(rows))), 2)
+                        .collectList().map(rows -> candidate(pair, rows)), 2)
                 .collectList()
-                .flatMap(results -> {
-                    String decision = results.stream().map(r -> r.pair + ":" + r.decision)
-                            .reduce((a, b) -> a + ", " + b).orElse("SKIP:no data");
-                    return save(current, decision, null);
-                }).onErrorResume(e -> save(current, "HALTED:data unavailable", e.getMessage()));
+                .flatMap(results -> Flux.fromIterable(results)
+                        .filter(r -> r.decision.startsWith("ENTRY_") && current.strategyId() != null)
+                        .flatMap(r -> publish(current, r), 1)
+                        .then(save(current, results.stream().map(r -> r.pair + ":" + r.decision)
+                                .reduce((a, b) -> a + ", " + b).orElse("SKIP:no data"), null)))
+                .onErrorResume(e -> save(current, "HALTED:data unavailable", e.getMessage()));
+
+    private Candidate candidate(String pair, List<CandleService.Candle> rows) {
+        int last = rows.size() - 2;
+        String decision = decide(rows);
+        BigDecimal price = last >= 0 ? rows.get(last).close() : BigDecimal.ZERO;
+        Instant candleTs = last >= 0 ? rows.get(last).ts() : Instant.now();
+        return new Candidate(pair, decision, price, candleTs);
+    }
+
+    private reactor.core.publisher.Mono<Void> publish(ScalperSettings current, Candidate candidate) {
+        String key = "scalper:" + current.id() + ":" + candidate.pair + ":" + candidate.candleTs;
+        Signal signal = new Signal(java.util.UUID.randomUUID(), current.tenantId(), current.strategyId(), key,
+                candidate.pair, current.timeframe(), candidate.decision.equals("ENTRY_LONG_CANDIDATE") ? "BUY" : "SELL",
+                candidate.price, candidate.candleTs, Json.of("{\"source\":\"scalper\"}"), Instant.now());
+        return signals.existsByIdempotencyKey(key).flatMap(exists -> exists ? reactor.core.publisher.Mono.empty()
+                : signals.save(signal).flatMap(execution::process).then()).onErrorResume(e -> reactor.core.publisher.Mono.empty());
+    }
     }
 
     private reactor.core.publisher.Mono<ScalperSettings> save(ScalperSettings s, String decision, String error) {
@@ -88,5 +114,5 @@ public class ScalperDecisionService {
         try { return mapper.readValue(json.asString(), mapper.getTypeFactory().constructCollectionType(List.class, String.class)); }
         catch (Exception e) { return new ArrayList<>(); }
     }
-    private record Result(String pair, String decision) {}
+    private record Candidate(String pair, String decision, BigDecimal price, Instant candleTs) {}
 }
