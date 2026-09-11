@@ -528,7 +528,7 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
                                           LiveFuturesSizingService.SizeResult sized, String clientOrderId,
                                           UUID orderId) {
         return futuresClient.placeOrder(key.apiKey(), key.apiSecret(), pair, side,
-                        sized.qty(), leverage, margin, null, null, clientOrderId)
+                        sized.qty(), leverage, margin, targetPrice, slPrice, clientOrderId)
                 .flatMap(resp -> {
                     log.info("LIVE placeOrder OK clientId={} pair={} resp={}",
                             clientOrderId, pair, resp);
@@ -820,20 +820,29 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
                     log.info("LIVE exit placeOrder OK clientId={} pair={} resp={}",
                             clientOrderId, pos.pair(), resp);
                     String exchangeId = extractExchangeOrderId(resp);
-                    if (exchangeId == null || exchangeId.isBlank()) {
-                        exchangeId = clientOrderId; // persist somehow; position still closes
-                    }
+                    String exchangeStatus = resp.path("status").asText("").toUpperCase();
+                    boolean confirmedFilled = "FILLED".equals(exchangeStatus)
+                            || "EXECUTED".equals(exchangeStatus);
+                    String persistedStatus = confirmedFilled ? "FILLED" : "PENDING_RECONCILE";
                     TradeOrder order = new TradeOrder(UUID.randomUUID(), bot.tenantId(),
                             bot.userId(), bot.id(), signalId,
                             exchangeId, clientOrderId, pos.pair(), closeSide.toUpperCase(),
-                            "MARKET_ORDER", "FUTURES", "LIVE", "FILLED",
-                            price, pos.quantity(), pos.quantity(), price, BigDecimal.ZERO, null,
+                            "MARKET_ORDER", "FUTURES", "LIVE", persistedStatus,
+                            price, pos.quantity(), confirmedFilled ? pos.quantity() : BigDecimal.ZERO,
+                            confirmedFilled ? price : null, BigDecimal.ZERO,
+                            confirmedFilled ? null : "Exit submitted; awaiting exchange reconciliation",
                             Instant.now(), Instant.now());
-                    return template.insert(order).then(closePosition(pos, price))
+                    Mono<Void> positionUpdate = confirmedFilled
+                            ? closePosition(pos, price)
+                            : audit.record(bot.tenantId(), bot.userId(), "LIVE_FUTURES_EXIT_PENDING",
+                                    "POSITION", pos.id(), Map.of("pair", pos.pair(),
+                                            "reason", reason, "clientOrderId", clientOrderId)).then();
+                    return template.insert(order).then(positionUpdate)
                             .then(audit.record(bot.tenantId(), bot.userId(), "LIVE_FUTURES_EXIT",
                                     "POSITION", pos.id(), Map.of("pair", pos.pair(),
                                             "price", price.toPlainString(), "reason", reason,
-                                            "exchangeOrderId", exchangeId)));
+                                            "exchangeOrderId", String.valueOf(exchangeId),
+                                            "status", persistedStatus)));
                 }));
     }
 
