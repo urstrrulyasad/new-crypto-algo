@@ -54,7 +54,8 @@ public class ScalperDecisionService {
                         .collectList().map(rows -> candidate(pair, rows)), 2)
                 .collectList()
                 .flatMap(results -> Flux.fromIterable(results)
-                        .filter(r -> r.decision.startsWith("ENTRY_") && current.strategyId() != null)
+                        .filter(r -> (r.decision.equals("ENTRY_LONG") || r.decision.equals("ENTRY_SHORT"))
+                                && current.strategyId() != null)
                         .flatMap(r -> publish(current, r), 1)
                         .then(save(current, results.stream().map(r -> r.pair + ":" + r.decision)
                                 .reduce((a, b) -> a + ", " + b).orElse("SKIP:no data"), null)))
@@ -71,7 +72,7 @@ public class ScalperDecisionService {
     private reactor.core.publisher.Mono<Void> publish(ScalperSettings current, Candidate candidate) {
         String key = "scalper:" + current.id() + ":" + candidate.pair + ":" + candidate.candleTs;
         Signal signal = new Signal(java.util.UUID.randomUUID(), current.tenantId(), current.strategyId(), key,
-                candidate.pair, current.timeframe(), candidate.decision.equals("ENTRY_LONG_CANDIDATE") ? "BUY" : "SELL",
+                candidate.pair, current.timeframe(), candidate.decision.equals("ENTRY_LONG") ? "ENTRY_LONG" : "ENTRY_SHORT",
                 candidate.price, candidate.candleTs, Json.of("{\"source\":\"scalper\"}"), Instant.now());
         return signals.existsByIdempotencyKey(key).flatMap(exists -> exists ? reactor.core.publisher.Mono.empty()
                 : signals.save(signal).flatMap(execution::process).then()).onErrorResume(e -> reactor.core.publisher.Mono.empty());
@@ -94,8 +95,8 @@ public class ScalperDecisionService {
         BigDecimal lastVolume = rows.get(last).volume();
         if (volume.signum() <= 0 || lastVolume.compareTo(volume.multiply(new BigDecimal("1.2"))) < 0)
             return "SKIP:no volume confirmation";
-        if (close.compareTo(fast) > 0 && fast.compareTo(slow) > 0) return "ENTRY_LONG_CANDIDATE";
-        if (close.compareTo(fast) < 0 && fast.compareTo(slow) < 0) return "ENTRY_SHORT_CANDIDATE";
+        if (close.compareTo(fast) > 0 && fast.compareTo(slow) > 0) return "ENTRY_LONG";
+        if (close.compareTo(fast) < 0 && fast.compareTo(slow) < 0) return "ENTRY_SHORT";
         return "SKIP:no trend edge";
     }
 

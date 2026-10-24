@@ -144,8 +144,14 @@ public class ExecutionService {
     }
 
     private Mono<Bot> handle(Bot bot, Signal signal, Risk risk) {
-        boolean isEntry = signal.action().startsWith("ENTRY");
-        return isEntry ? enter(bot, signal, risk) : exit(bot, signal);
+        return switch (signal.action()) {
+            case "ENTRY_LONG", "ENTRY_SHORT" -> enter(bot, signal, risk);
+            case "EXIT_LONG", "EXIT_SHORT", "EXIT" -> exit(bot, signal);
+            default -> {
+                log.warn("Ignoring unsupported signal action {} for signal {}", signal.action(), signal.id());
+                yield Mono.empty();
+            }
+        };
     }
 
     // ------------------------------------------------------------------ entry
