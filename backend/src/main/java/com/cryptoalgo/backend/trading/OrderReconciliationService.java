@@ -57,7 +57,11 @@ public class OrderReconciliationService {
                         orders.findByStatusAndModeOrderByCreatedAtAsc("SUBMITTING", "LIVE")
                 )
                 .distinct(TradeOrder::id)
-                .flatMap(this::refreshOrder, 4)
+                .flatMap(order -> refreshOrder(order)
+                        .onErrorResume(error -> {
+                            log.warn("Unable to reconcile order {} without stopping the cycle", order.id(), error);
+                            return Mono.empty();
+                        }), 4)
                 .doFinally(signal -> reconcileInFlight.set(false))
                 .subscribe(o -> {}, e -> log.error("Reconciliation cycle failed", e));
     }

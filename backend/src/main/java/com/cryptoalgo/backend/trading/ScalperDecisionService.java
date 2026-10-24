@@ -76,7 +76,6 @@ public class ScalperDecisionService {
         return signals.existsByIdempotencyKey(key).flatMap(exists -> exists ? reactor.core.publisher.Mono.empty()
                 : signals.save(signal).flatMap(execution::process).then()).onErrorResume(e -> reactor.core.publisher.Mono.empty());
     }
-    }
 
     private reactor.core.publisher.Mono<ScalperSettings> save(ScalperSettings s, String decision, String error) {
         return settings.save(new ScalperSettings(s.id(), s.tenantId(), s.userId(), s.strategyId(), s.enabled(), s.mode(),
