@@ -117,6 +117,38 @@ public class TenantLiveRiskGate {
                         .then()));
     }
 
+    /**
+     * Releases the exact amount persisted on an order, once only. The row lock
+     * and zeroing update make retries and concurrent reconciliation harmless.
+     */
+    public Mono<Void> releaseOrderReservation(UUID tenantId, UUID orderId) {
+        return tx.transactional(ensureRow(tenantId).then(
+                db.sql("""
+                        WITH claim AS (
+                            SELECT reserved_margin_inr AS amount
+                            FROM orders
+                            WHERE id = :oid AND tenant_id = :tid
+                              AND reserved_margin_inr > 0
+                            FOR UPDATE
+                        ), cleared AS (
+                            UPDATE orders
+                            SET reserved_margin_inr = 0, updated_at = :now
+                            WHERE id = :oid AND tenant_id = :tid
+                              AND reserved_margin_inr > 0
+                            RETURNING id
+                        )
+                        SELECT claim.amount
+                        FROM claim JOIN cleared ON TRUE
+                        """)
+                        .bind("oid", orderId)
+                        .bind("tid", tenantId)
+                        .bind("now", Instant.now())
+                        .map((row, meta) -> row.get("amount", BigDecimal.class))
+                        .one()
+                        .flatMap(amount -> release(tenantId, amount))
+                        .then()));
+    }
+
     private Mono<Void> ensureRow(UUID tenantId) {
         return db.sql("""
                         INSERT INTO tenant_live_risk (tenant_id, reserved_margin_inr, protection_degraded, updated_at)

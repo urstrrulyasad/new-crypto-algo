@@ -8,6 +8,7 @@ import com.cryptoalgo.backend.repo.TradeOrderRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -30,11 +31,12 @@ public class OrderReconciliationService {
     private final CoinDcxFuturesClient futures;
     private final SecretCrypto crypto;
     private final TenantLiveRiskGate riskGate;
+    private final DatabaseClient db;
 
     public OrderReconciliationService(TradeOrderRepository orders, BotRepository bots,
                                       ExchangeKeyRepository keys, CoinDcxTradeClient trade,
                                       CoinDcxFuturesClient futures, SecretCrypto crypto,
-                                      TenantLiveRiskGate riskGate) {
+                                      TenantLiveRiskGate riskGate, DatabaseClient db) {
         this.orders = orders;
         this.bots = bots;
         this.keys = keys;
@@ -42,6 +44,7 @@ public class OrderReconciliationService {
         this.futures = futures;
         this.crypto = crypto;
         this.riskGate = riskGate;
+        this.db = db;
     }
 
     @Scheduled(fixedDelayString = "${app.reconcile-ms:15000}")
@@ -94,11 +97,10 @@ public class OrderReconciliationService {
     }
 
     private Mono<TradeOrder> settleFromExchange(TradeOrder order, com.fasterxml.jackson.databind.JsonNode status) {
-        String s = status.path("status").asText("open").toUpperCase();
-        String exchangeId = status.path("id").asText(order.exchangeOrderId());
-        BigDecimal total = new BigDecimal(status.path("total_quantity")
-                .asText(order.quantity() == null ? "0" : order.quantity().toPlainString()));
-        BigDecimal remaining = new BigDecimal(status.path("remaining_quantity").asText("0"));
+        String s = firstText(status, "status", "order_status", "state", "open").toUpperCase();
+        String exchangeId = firstText(status, "id", "order_id", "exchange_order_id", order.exchangeOrderId());
+        BigDecimal total = decimal(status, order.quantity(), "total_quantity", "orig_qty", "quantity");
+        BigDecimal remaining = decimal(status, BigDecimal.ZERO, "remaining_quantity", "remaining_qty", "leaves_qty");
         String mapped = s.contains("PARTIAL") ? "OPEN"
                 : s.contains("FILL") ? "FILLED"
                 : s.contains("CANCEL") ? "CANCELLED"
@@ -109,27 +111,39 @@ public class OrderReconciliationService {
                 order.clientOrderId(), order.pair(), order.side(), order.orderType(),
                 order.marketType(), order.mode(), mapped,
                 order.price(), order.quantity(), total.subtract(remaining),
-                new BigDecimal(status.path("avg_price").asText(
-                        order.avgPrice() == null ? "0" : order.avgPrice().toPlainString())),
-                new BigDecimal(status.path("fee_amount").asText(
-                        order.fee() == null ? "0" : order.fee().toPlainString())),
+                decimal(status, order.avgPrice(), "avg_price", "average_price", "price"),
+                decimal(status, order.fee(), "fee_amount", "fee", "fees"),
                 order.error(), order.createdAt(), Instant.now());
         return orders.save(updated)
                 .flatMap(saved -> {
                     if ("REJECTED".equals(mapped) || "CANCELLED".equals(mapped)
-                            || "FAILED".equals(mapped)) {
-                        BigDecimal release = order.price() == null || order.quantity() == null
-                                ? BigDecimal.ZERO : order.quantity(); // best-effort; reservation uses margin INR
-                        // Release any leftover reservation tied to ambiguous submit (qty not INR —
-                        // use stake proxy via error path already released on hard fail).
-                        return riskGate.release(order.tenantId(),
-                                        order.price() != null && order.quantity() != null
-                                                ? order.price().multiply(order.quantity())
-                                                : BigDecimal.ZERO)
+                            || "FAILED".equals(mapped) || "FILLED".equals(mapped)) {
+                        return riskGate.releaseOrderReservation(order.tenantId(), order.id())
                                 .thenReturn(saved);
                     }
                     return Mono.just(saved);
                 });
+    }
+
+    private static String firstText(com.fasterxml.jackson.databind.JsonNode node, String... names) {
+        for (String name : names) {
+            if (name == null) continue;
+            String value = node.path(name).asText("");
+            if (!value.isBlank() && !"null".equalsIgnoreCase(value)) return value;
+        }
+        return "";
+    }
+
+    private static BigDecimal decimal(com.fasterxml.jackson.databind.JsonNode node,
+                                      BigDecimal fallback, String... names) {
+        String raw = firstText(node, names);
+        if (raw.isBlank()) return fallback == null ? BigDecimal.ZERO : fallback;
+        try {
+            BigDecimal value = new BigDecimal(raw);
+            return value.signum() < 0 ? (fallback == null ? BigDecimal.ZERO : fallback) : value;
+        } catch (NumberFormatException ignored) {
+            return fallback == null ? BigDecimal.ZERO : fallback;
+        }
     }
 
     private static TradeOrder copyStatus(TradeOrder order, String status, String error) {

@@ -517,6 +517,16 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
                                                                         BigDecimal.ZERO, null,
                                                                         Instant.now(), Instant.now());
                                                                 return template.insert(pending)
+                                                                        .then(template.getDatabaseClient().sql("""
+                                                                                UPDATE orders
+                                                                                SET reserved_margin_inr = :amount,
+                                                                                    updated_at = :now
+                                                                                WHERE id = :id
+                                                                                """)
+                                                                                .bind("amount", sized.marginInr())
+                                                                                .bind("now", Instant.now())
+                                                                                .bind("id", pending.id())
+                                                                                .fetch().rowsUpdated())
                                                                         .then(submitFuturesEntry(bot, signal, key, pair,
                                                                                 side, margin, configuredLev, mark,
                                                                                 posSide, slPrice, targetPrice,
@@ -572,7 +582,7 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
                                 .then();
                     }
                     log.error("CoinDCX futures placeOrder failed for bot {}: {}", bot.id(), e.getMessage());
-                    return riskGate.release(bot.tenantId(), sized.marginInr())
+                    return riskGate.releaseOrderReservation(bot.tenantId(), orderId)
                             .then(template.getDatabaseClient().sql("""
                                             UPDATE orders SET status = 'FAILED', error = :err, updated_at = :now
                                             WHERE id = :id
@@ -607,7 +617,7 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
         return update
                 .then(aggregateOpenPosition(bot, pair, posSide, sized.qty(), mark,
                         slPrice, targetPrice, bot.leverage(), margin))
-                .flatMap(pos -> riskGate.release(bot.tenantId(), sized.marginInr())
+                .flatMap(pos -> riskGate.releaseOrderReservation(bot.tenantId(), orderId)
                         .then(armProtection(bot, pos))
                         .then(audit.record(bot.tenantId(), bot.userId(),
                         "LIVE_FUTURES_ORDER", "ORDER", orderId,
