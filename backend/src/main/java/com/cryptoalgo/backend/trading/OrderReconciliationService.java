@@ -97,11 +97,15 @@ public class OrderReconciliationService {
     }
 
     private Mono<TradeOrder> settleFromExchange(TradeOrder order, com.fasterxml.jackson.databind.JsonNode status) {
-        String s = firstText(status, "status", "order_status", "state", "open").toUpperCase();
-        String exchangeId = firstText(status, "id", "order_id", "exchange_order_id", order.exchangeOrderId());
-        BigDecimal total = decimal(status, order.quantity(), "total_quantity", "orig_qty", "quantity");
+        String s = firstText(status, "status", "order_status", "state").toUpperCase();
+        String exchangeId = firstText(status, "id", "order_id", "exchange_order_id", "orderId", order.exchangeOrderId());
+        BigDecimal total = decimal(status, order.quantity(), "total_quantity", "orig_qty", "quantity", "order_quantity");
         BigDecimal remaining = decimal(status, BigDecimal.ZERO, "remaining_quantity", "remaining_qty", "leaves_qty");
-        String mapped = s.contains("PARTIAL") ? "OPEN"
+        BigDecimal reportedFilled = total.subtract(remaining).max(BigDecimal.ZERO);
+        BigDecimal priorFilled = order.filledQty() == null ? BigDecimal.ZERO : order.filledQty();
+        BigDecimal filled = reportedFilled.max(priorFilled).min(total.max(priorFilled));
+        String mapped = s.isBlank() ? "MANUAL_REVIEW"
+                : s.contains("PARTIAL") ? "OPEN"
                 : s.contains("FILL") ? "FILLED"
                 : s.contains("CANCEL") ? "CANCELLED"
                 : s.contains("REJECT") ? "REJECTED"
@@ -110,10 +114,11 @@ public class OrderReconciliationService {
                 order.botId(), order.signalId(), exchangeId,
                 order.clientOrderId(), order.pair(), order.side(), order.orderType(),
                 order.marketType(), order.mode(), mapped,
-                order.price(), order.quantity(), total.subtract(remaining),
-                decimal(status, order.avgPrice(), "avg_price", "average_price", "price"),
+                order.price(), total, filled,
+                decimal(status, order.avgPrice(), "avg_price", "average_price", "executed_price", "price"),
                 decimal(status, order.fee(), "fee_amount", "fee", "fees"),
-                order.error(), order.createdAt(), Instant.now());
+                "MANUAL_REVIEW".equals(mapped) ? "exchange response missing status" : order.error(),
+                order.createdAt(), Instant.now());
         return orders.save(updated)
                 .flatMap(saved -> {
                     if ("REJECTED".equals(mapped) || "CANCELLED".equals(mapped)

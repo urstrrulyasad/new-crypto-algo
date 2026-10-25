@@ -1,4 +1,7 @@
 -- Reliability follow-up: make fill application and reservation release retry-safe.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS reserved_margin_inr NUMERIC(30,10) NOT NULL DEFAULT 0;
+UPDATE orders SET reserved_margin_inr = reserved_amount
+WHERE reserved_margin_inr = 0 AND reserved_amount > 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS accounted_filled_qty NUMERIC(30,10) NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS recovery_state VARCHAR(30);
 

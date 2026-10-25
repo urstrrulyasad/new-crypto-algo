@@ -605,7 +605,7 @@ Instant dayStart = LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOf
                                                String clientOrderId, UUID orderId, String exchangeId) {
         var update = template.getDatabaseClient().sql("""
                         UPDATE orders SET exchange_order_id = :eid, status = 'OPEN',
-                          filled_qty = :fq, avg_price = :ap, updated_at = :now
+                          filled_qty = 0, avg_price = NULL, updated_at = :now
                         WHERE id = :id
                         """)
                 .bind("eid", exchangeId)
