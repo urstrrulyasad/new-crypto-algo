@@ -1,0 +1,25 @@
+{
+  "name": "quantdcx",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "npm run build --workspace=frontend",
+    "start": "NODE_ENV=production tsx server.ts",
+    "lint": "npm run lint --workspace=frontend"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.13.2",
+    "tsx": "^4.19.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}

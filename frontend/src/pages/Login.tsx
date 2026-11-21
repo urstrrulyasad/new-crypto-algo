@@ -132,6 +132,8 @@ export default function Login() {
           className="mt-6 text-center text-xs text-slate-500"
         >
           Multi-tenant platform — ask your admin for an account.
+          <br />
+          <span className="text-slate-400">Default admin: admin@platform.local / ChangeMe123!</span>
         </motion.p>
       </motion.div>
     </div>

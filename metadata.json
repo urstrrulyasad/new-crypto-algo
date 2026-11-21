@@ -1,0 +1,5 @@
+{
+  "name": "QuantDCX — AI Crypto Trading Platform",
+  "description": "Autonomous multi-tenant AI crypto trading platform for CoinDCX INR futures with strategy backtesting, paper trading, live execution monitoring, and candlestick charts.",
+  "requestFramePermissions": []
+}
