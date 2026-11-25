@@ -63,40 +63,50 @@ public class PortfolioController {
     @GetMapping("/positions")
     public Flux<Map<String, Object>> positions(@RequestParam(defaultValue = "LIVE") String mode) {
         String m = normalizeMode(mode);
-        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), m)
-                .flatMapMany(ids -> {
-                    Flux<Position> rows = positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
-                                    p.tenantId(), p.userId())
-                            .filter(pos -> ids.contains(pos.botId()));
-                    if (!"LIVE".equals(m)) {
-                        // flatMapSequential: enrich pairs in parallel, preserve openedAt-desc order.
-                        return rows.flatMapSequential(this::enrichPosition, ENRICH_CONCURRENCY);
-                    }
-                    return liveExchangeByPair(p).flatMapMany(ex ->
-                            rows.flatMapSequential(pos -> enrichLivePosition(pos, ex.get(pos.pair())),
-                                    ENRICH_CONCURRENCY));
-
-                }));
+        return CurrentUser.get().flatMapMany(p -> {
+            Mono<Boolean> allow = "LIVE".equals(m) ? hasActiveKey(p) : Mono.just(true);
+            return allow.flatMapMany(ok -> {
+                if (!ok) return Flux.empty();
+                return botIds(p.tenantId(), p.userId(), m)
+                        .flatMapMany(ids -> {
+                            Flux<Position> rows = positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
+                                            p.tenantId(), p.userId())
+                                    .filter(pos -> ids.contains(pos.botId()));
+                            if (!"LIVE".equals(m)) {
+                                // flatMapSequential: enrich pairs in parallel, preserve openedAt-desc order.
+                                return rows.flatMapSequential(this::enrichPosition, ENRICH_CONCURRENCY);
+                            }
+                            return liveExchangeByPair(p).flatMapMany(ex ->
+                                    rows.flatMapSequential(pos -> enrichLivePosition(pos, ex.get(pos.pair())),
+                                            ENRICH_CONCURRENCY));
+                        });
+            });
+        });
     }
 
     @GetMapping("/orders")
     public Flux<Map<String, Object>> orders(@RequestParam(defaultValue = "LIVE") String mode) {
         String m = normalizeMode(mode);
-        return CurrentUser.get().flatMapMany(p -> botIds(p.tenantId(), p.userId(), m)
-                .flatMapMany(ids -> Mono.zip(
-                                orders.findByTenantIdAndUserIdOrderByCreatedAtDesc(
-                                                p.tenantId(), p.userId())
-                                        .filter(o -> ids.contains(o.botId()))
-                                        .collectList(),
-                                positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
-                                                p.tenantId(), p.userId())
-                                        .filter(pos -> ids.contains(pos.botId()))
-                                        .collectList(),
-                                settleRateForDisplay(p, m)
-                        ).flatMapMany(t -> Flux.fromIterable(t.getT1())
-                                .flatMapSequential(o -> enrichOrder(o, t.getT2(), t.getT3()),
-                                        ENRICH_CONCURRENCY))));
-
+        return CurrentUser.get().flatMapMany(p -> {
+            Mono<Boolean> allow = "LIVE".equals(m) ? hasActiveKey(p) : Mono.just(true);
+            return allow.flatMapMany(ok -> {
+                if (!ok) return Flux.empty();
+                return botIds(p.tenantId(), p.userId(), m)
+                        .flatMapMany(ids -> Mono.zip(
+                                        orders.findByTenantIdAndUserIdOrderByCreatedAtDesc(
+                                                        p.tenantId(), p.userId())
+                                                .filter(o -> ids.contains(o.botId()))
+                                                .collectList(),
+                                        positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(
+                                                        p.tenantId(), p.userId())
+                                                .filter(pos -> ids.contains(pos.botId()))
+                                                .collectList(),
+                                        settleRateForDisplay(p, m)
+                                ).flatMapMany(t -> Flux.fromIterable(t.getT1())
+                                        .flatMapSequential(o -> enrichOrder(o, t.getT2(), t.getT3()),
+                                                ENRICH_CONCURRENCY)));
+            });
+        });
     }
 
     /** CoinDCX INR order size uses settlement rate (~102), not spot USDTINR ticker. */
@@ -115,14 +125,37 @@ public class PortfolioController {
     @GetMapping("/summary")
     public Mono<Map<String, Object>> summary(@RequestParam(defaultValue = "LIVE") String mode) {
         String m = normalizeMode(mode);
-        return CurrentUser.get().flatMap(p ->
-                botIds(p.tenantId(), p.userId(), m).flatMap(ids ->
+        return CurrentUser.get().flatMap(p -> {
+            if (!"LIVE".equals(m)) {
+                return botIds(p.tenantId(), p.userId(), m).flatMap(ids ->
                         positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(p.tenantId(), p.userId())
                                 .filter(pos -> ids.contains(pos.botId()))
                                 .collectList()
-                                .flatMap(list -> "LIVE".equals(m)
-                                        ? liveExchangeByPair(p).flatMap(ex -> summarizeLive(list, ex))
-                                        : summarize(list, m))));
+                                .flatMap(list -> summarize(list, m)));
+            }
+            return hasActiveKey(p).flatMap(ok -> {
+                if (!ok) {
+                    Map<String, Object> empty = summaryMap("LIVE", new Counts(BigDecimal.ZERO, 0, 0, 0), BigDecimal.ZERO);
+                    empty.put("hasApiKey", false);
+                    return Mono.just(empty);
+                }
+                return botIds(p.tenantId(), p.userId(), "LIVE").flatMap(ids ->
+                        positions.findByTenantIdAndUserIdOrderByOpenedAtDesc(p.tenantId(), p.userId())
+                                .filter(pos -> ids.contains(pos.botId()))
+                                .collectList()
+                                .flatMap(list -> liveExchangeByPair(p).flatMap(ex -> summarizeLive(list, ex)
+                                        .map(map -> {
+                                            map.put("hasApiKey", true);
+                                            return map;
+                                        }))));
+            });
+        });
+    }
+
+    private Mono<Boolean> hasActiveKey(AuthPrincipal p) {
+        return keys.findByTenantIdAndUserId(p.tenantId(), p.userId())
+                .filter(k -> "ACTIVE".equals(k.status()))
+                .hasElements();
     }
 
     /**

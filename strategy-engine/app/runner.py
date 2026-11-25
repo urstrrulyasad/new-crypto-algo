@@ -57,14 +57,16 @@ def _rise(closed, prev, col: str) -> bool:
 
 
 def _action_for(closed, prev) -> str | None:
-    if _rise(closed, prev, "enter_long"):
-        return "ENTRY_LONG"
-    if _rise(closed, prev, "enter_short"):
-        return "ENTRY_SHORT"
     if _rise(closed, prev, "exit_long"):
         return "EXIT_LONG"
     if _rise(closed, prev, "exit_short"):
         return "EXIT_SHORT"
+    enter_l = _rise(closed, prev, "enter_long") and not _on(closed, "exit_long")
+    enter_s = _rise(closed, prev, "enter_short") and not _on(closed, "exit_short")
+    if enter_l and not enter_s:
+        return "ENTRY_LONG"
+    if enter_s and not enter_l:
+        return "ENTRY_SHORT"
     return None
 
 
@@ -99,8 +101,11 @@ async def evaluate_strategy(item: dict) -> None:
         action = _action_for(closed, prev)
         if action is None:
             continue
+        close_px = float(closed["close"])
+        if close_px <= 0:
+            continue
 
-        await _post_signal(item, pair, timeframe, action, float(closed["close"]),
+        await _post_signal(item, pair, timeframe, action, close_px,
                            closed["date"].isoformat(), catchup=False)
 
 
@@ -148,19 +153,21 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
             price_open = float(closed["open"])
             high = float(closed["high"])
             low = float(closed["low"])
+            if price_open <= 0 or high <= 0 or low <= 0:
+                continue
             ts = closed["date"].isoformat()
-
 
             if pos is None:
                 # Entry fires when the PREVIOUS bar flagged it, filled at THIS
                 # bar's open (next open) + slippage — same convention as the
-                # backtest promotion gate. Level-based, not rising-edge, so it
-                # survives repeated frames.
-                if _on(prev, "enter_long"):
+                # backtest promotion gate.
+                enter_l = _on(prev, "enter_long") and not _on(prev, "exit_long")
+                enter_s = _on(prev, "enter_short") and not _on(prev, "exit_short")
+                if enter_l and not enter_s:
                     pos = "LONG"
                     entry_price = price_open * (1 + SLIPPAGE)
                     entry_time = closed["date"]
-                elif _on(prev, "enter_short"):
+                elif enter_s and not enter_l:
                     pos = "SHORT"
                     entry_price = price_open * (1 - SLIPPAGE)
                     entry_time = closed["date"]
@@ -172,6 +179,8 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
                     entry_price, ts, catchup=True)
                 if result.get("status") == "ACCEPTED":
                     accepted += 1
+                else:
+                    skipped += 1
                 await asyncio.sleep(0.01)
                 continue
 
@@ -219,6 +228,8 @@ async def catchup_strategy(item: dict, bars: int = 800) -> dict:
                 catchup=True, key_tag=key_tag)
             if result.get("status") == "ACCEPTED":
                 accepted += 1
+            else:
+                skipped += 1
             pos = None
             entry_price = 0.0
             entry_time = None

@@ -29,6 +29,8 @@ def run_backtest(strategy_cls, df: pd.DataFrame, pair: str, stake: float = 1000.
     for col in ("enter_long", "exit_long", "enter_short", "exit_short"):
         if col not in df.columns:
             df[col] = 0
+        else:
+            df[col] = df[col].fillna(0).astype(int)
     df = df.reset_index(drop=True)
 
     trades: list[dict] = []
@@ -42,12 +44,16 @@ def run_backtest(strategy_cls, df: pd.DataFrame, pair: str, stake: float = 1000.
         row = df.iloc[i]
         prev = df.iloc[i - 1]
         price_open = float(row["open"])
+        if not math.isfinite(price_open) or price_open <= 0:
+            continue
 
         if side is None:
-            if prev.get("enter_long", 0) == 1:
+            enter_l = prev.get("enter_long", 0) == 1 and prev.get("exit_long", 0) != 1
+            enter_s = is_futures and prev.get("enter_short", 0) == 1 and prev.get("exit_short", 0) != 1
+            if enter_l and not enter_s:
                 side, entry_price, entry_time = "long", price_open * (1 + SLIPPAGE), row["date"]
                 continue
-            if is_futures and prev.get("enter_short", 0) == 1:
+            if enter_s and not enter_l:
                 side, entry_price, entry_time = "short", price_open * (1 - SLIPPAGE), row["date"]
                 continue
             continue

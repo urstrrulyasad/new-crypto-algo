@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { api } from '@/lib/api'
+import { IconChevronRight, IconSearch } from '@/components/Icons'
 import { Card, Empty, Input, PageShell, PageTitle, Spinner } from '@/components/ui'
 
 interface InstrumentsResp {
@@ -34,43 +35,59 @@ export default function FuturesCoins() {
 
   return (
     <PageShell>
-      <PageTitle title="Coins" subtitle="INR futures instruments — clean live charts, no strategy overlays" />
+      <PageTitle
+        title="Futures Coins"
+        subtitle="CoinDCX INR-margined futures instruments — open any pair for live candlestick charts"
+      />
 
-      <Card className="mt-2" hover={false}>
-        <Input
-          placeholder="Filter pair (e.g. BTC)"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          className="mb-4 max-w-md"
-        />
+      <Card hover={false}>
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative w-full max-w-md">
+            <IconSearch className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+            <Input
+              placeholder="Filter pair (e.g. BTC, ETH, SOL)"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          {pairs && (
+            <span className="font-mono-num text-xs text-slate-400">
+              {filtered.length} of {pairs.length} instruments
+            </span>
+          )}
+        </div>
+
         {err && <p className="mb-3 text-sm text-rose-400">{err}</p>}
         {pairs === null ? (
           <Spinner />
         ) : filtered.length === 0 ? (
-          <Empty message={pairs.length === 0 ? 'No instruments returned.' : 'No match.'} />
+          <Empty message={pairs.length === 0 ? 'No instruments returned.' : 'No matching pairs.'} />
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((pair, i) => (
-              <motion.div
-                key={pair}
-                initial={i < 48 ? { opacity: 0, y: 8 } : false}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: Math.min(i * 0.012, 0.35), duration: 0.35 }}
-              >
-                <Link
-                  to={`/futures/chart/${encodeURIComponent(pair)}?mode=clean&timeframe=5m`}
-                  className="glass-hover block rounded-xl border border-edge bg-surface/40 px-4 py-3 text-sm font-medium text-slate-200 hover:text-cyan-200"
+            {filtered.slice(0, 120).map((pair, i) => {
+              const base = pair.replace(/^B-/, '').replace(/_USDT$/, '').replace(/_INR$/, '')
+              return (
+                <motion.div
+                  key={pair}
+                  initial={i < 36 ? { opacity: 0, y: 6 } : false}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: Math.min(i * 0.008, 0.2), duration: 0.22 }}
                 >
-                  {pair}
-                </Link>
-              </motion.div>
-            ))}
+                  <Link
+                    to={`/futures/chart/${encodeURIComponent(pair)}?mode=clean&timeframe=5m`}
+                    className="glass-hover flex items-center justify-between rounded-xl border border-edge bg-surface/60 px-3.5 py-2.5 text-sm transition-colors hover:text-amber-200"
+                  >
+                    <div>
+                      <div className="font-medium text-slate-100">{base}</div>
+                      <div className="font-mono-num text-[11px] text-slate-500">{pair}</div>
+                    </div>
+                    <IconChevronRight className="h-4 w-4 text-slate-500" />
+                  </Link>
+                </motion.div>
+              )
+            })}
           </div>
-        )}
-        {pairs && pairs.length > 0 && (
-          <p className="mt-4 text-xs text-slate-500">
-            Showing {filtered.length} of {pairs.length}
-          </p>
         )}
       </Card>
     </PageShell>

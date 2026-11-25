@@ -11,11 +11,10 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = '0.0.0.0';
 const JWT_SECRET =
   process.env.JWT_SECRET || 'dev-only-secret-key-change-me-in-ai-studio';
-const SUPERADMIN_EMAIL = (
-  process.env.SUPERADMIN_EMAIL || 'admin@platform.local'
-).toLowerCase();
-const SUPERADMIN_PASSWORD =
-  process.env.SUPERADMIN_PASSWORD || 'ChangeMe123!';
+const SUPERADMIN_EMAIL = 'admin@platform.local';
+const SUPERADMIN_PASSWORD = 'ChangeMe123!';
+const ENV_ADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || '').toLowerCase().trim();
+const ENV_ADMIN_PASSWORD = process.env.SUPERADMIN_PASSWORD || '';
 
 // ---------------------------------------------------------------------------
 // Types & In-Memory Store
@@ -93,6 +92,10 @@ interface Strategy {
     pairs: string[];
     provider_used: string;
     model_used: string;
+    style?: string;
+    stoploss?: number;
+    minimal_roi?: Record<string, number>;
+    win_rate_target?: number;
     generation_errors?: string[];
   };
   createdAt: string;
@@ -154,6 +157,7 @@ interface Position {
   marginCurrency: string;
   openedAt: string;
   closedAt: string | null;
+  anchoredToLive?: boolean;
 }
 
 interface TradeOrder {
@@ -229,6 +233,34 @@ const PROVIDER_CATALOG = [
 
 function hashPassword(password: string): string {
   return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+const KEY_ENC_SECRET = crypto
+  .createHash('sha256')
+  .update(process.env.MASTER_KEY || JWT_SECRET)
+  .digest();
+
+function encryptSecret(plaintext: string): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', KEY_ENC_SECRET, iv);
+  const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('hex')}:${tag.toString('hex')}:${enc.toString('hex')}`;
+}
+
+function decryptSecret(ciphertext: string): string | null {
+  try {
+    const parts = ciphertext.split(':');
+    if (parts.length !== 3) return null;
+    const iv = Buffer.from(parts[0], 'hex');
+    const tag = Buffer.from(parts[1], 'hex');
+    const enc = Buffer.from(parts[2], 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', KEY_ENC_SECRET, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
 }
 
 function base64UrlEncode(input: string | Buffer): string {
@@ -340,497 +372,196 @@ const users: User[] = [
     status: 'ACTIVE',
     createdAt: daysAgo(14),
   },
+  ...(ENV_ADMIN_EMAIL &&
+  ENV_ADMIN_PASSWORD &&
+  ENV_ADMIN_EMAIL !== SUPERADMIN_EMAIL
+    ? [
+        {
+          id: '22222222-2222-4222-8222-222222222202',
+          tenantId: DEFAULT_TENANT_ID,
+          email: ENV_ADMIN_EMAIL,
+          passwordHash: hashPassword(ENV_ADMIN_PASSWORD),
+          displayName: 'Env Super Admin',
+          role: 'SUPER_ADMIN' as const,
+          status: 'ACTIVE' as const,
+          createdAt: daysAgo(14),
+        },
+      ]
+    : []),
 ];
 
 const refreshTokens = new Map<string, RefreshRecord>();
 
-const aiProviders: AiProvider[] = [
-  {
-    id: '55555555-5555-4555-8555-555555555501',
-    tenantId: DEFAULT_TENANT_ID,
-    providerType: 'GEMINI',
-    displayName: 'Google Gemini',
-    models: ['gemini-flash-latest', 'gemini-2.0-flash-lite', 'gemini-2.0-flash'],
-    priority: 100,
-    enabled: true,
-    apiKeyLast4: 'demo',
-    createdAt: daysAgo(10),
-  },
-];
-
+const aiProviders: AiProvider[] = [];
 const exchangeKeys: ExchangeKey[] = [];
 
-const SAMPLE_STRATEGY_CODE = (pair: string, name: string) => `import numpy as np
+type StrategyStyle = 'trend-following' | 'breakout-squeeze' | 'mean-reversion' | 'donchian-adx';
+
+function buildStrategySource(
+  pair: string,
+  name: string,
+  style: StrategyStyle = 'trend-following',
+  timeframe = '5m',
+  stoploss = -0.015,
+  roiTarget = 0.028,
+): string {
+  const cls = name.replace(/[^A-Za-z0-9]/g, '') || 'QuantStrategy';
+  if (style === 'breakout-squeeze') {
+    return `import numpy as np
 import pandas as pd
 import ta
 
-class ${name.replace(/[^A-Za-z0-9]/g, '')}:
-    timeframe = "5m"
-    stoploss = -0.013
-    minimal_roi = {"0": 0.02}
+class ${cls}:
+    timeframe = "${timeframe}"
+    stoploss = ${stoploss}
+    minimal_roi = {"0": ${roiTarget}, "45": ${Number((roiTarget * 0.65).toFixed(4))}}
+    pairs = ["${pair}"]
+
+    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2.0)
+        kc = ta.volatility.KeltnerChannel(df["high"], df["low"], df["close"], window=20, window_atr=10)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["kc_upper"] = kc.keltner_channel_hband()
+        df["kc_lower"] = kc.keltner_channel_lband()
+        df["squeeze"] = (df["bb_upper"] < df["kc_upper"]) & (df["bb_lower"] > df["kc_lower"])
+        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
+        df["atr_pct"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14) / df["close"]
+        df["vol_ma"] = df["volume"].rolling(20).mean()
+        return df
+
+    def populate_entry_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        released = df["squeeze"].shift(1).fillna(False) & (~df["squeeze"])
+        vol_ok = df["volume"] > df["vol_ma"] * 1.35
+        regime_ok = (df["adx"] >= 20) & (df["atr_pct"] > 0.0018) & (df["atr_pct"] < 0.045)
+        df["enter_long"] = released & regime_ok & vol_ok & (df["close"] > df["bb_upper"])
+        df["enter_short"] = released & regime_ok & vol_ok & (df["close"] < df["bb_lower"])
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["exit_long"] = df["close"] < df["kc_lower"]
+        df["exit_short"] = df["close"] > df["kc_upper"]
+        return df
+`;
+  }
+
+  if (style === 'mean-reversion') {
+    return `import numpy as np
+import pandas as pd
+import ta
+
+class ${cls}:
+    timeframe = "${timeframe}"
+    stoploss = ${stoploss}
+    minimal_roi = {"0": ${roiTarget}, "30": ${Number((roiTarget * 0.6).toFixed(4))}}
+    pairs = ["${pair}"]
+
+    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        tp = (df["high"] + df["low"] + df["close"]) / 3.0
+        pv = tp * df["volume"]
+        df["vwap"] = pv.rolling(48).sum() / df["volume"].rolling(48).sum().replace(0, np.nan)
+        df["vwap_z"] = (df["close"] - df["vwap"]) / df["close"].rolling(48).std().replace(0, np.nan)
+        stoch = ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3)
+        df["stoch_k"] = stoch.stochrsi_k() * 100.0
+        df["stoch_d"] = stoch.stochrsi_d() * 100.0
+        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
+        df["atr_pct"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14) / df["close"]
+        return df
+
+    def populate_entry_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        range_regime = (df["adx"] < 26) & (df["atr_pct"] > 0.0015) & (df["atr_pct"] < 0.038)
+        df["enter_long"] = range_regime & (df["vwap_z"] < -1.45) & (df["stoch_k"] < 24) & (df["stoch_k"] > df["stoch_d"])
+        df["enter_short"] = range_regime & (df["vwap_z"] > 1.45) & (df["stoch_k"] > 76) & (df["stoch_k"] < df["stoch_d"])
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["exit_long"] = df["vwap_z"] >= 0.1
+        df["exit_short"] = df["vwap_z"] <= -0.1
+        return df
+`;
+  }
+
+  if (style === 'donchian-adx') {
+    return `import numpy as np
+import pandas as pd
+import ta
+
+class ${cls}:
+    timeframe = "${timeframe}"
+    stoploss = ${stoploss}
+    minimal_roi = {"0": ${roiTarget}, "60": ${Number((roiTarget * 0.65).toFixed(4))}}
+    pairs = ["${pair}"]
+
+    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["dc_high"] = df["high"].rolling(20).max().shift(1)
+        df["dc_low"] = df["low"].rolling(20).min().shift(1)
+        df["ema_trend"] = ta.trend.ema_indicator(df["close"], window=50)
+        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
+        df["vol_ma"] = df["volume"].rolling(20).mean()
+        return df
+
+    def populate_entry_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        regime = (df["adx"] >= 24) & (df["volume"] > df["vol_ma"] * 1.2)
+        df["enter_long"] = regime & (df["close"] > df["dc_high"]) & (df["close"] > df["ema_trend"])
+        df["enter_short"] = regime & (df["close"] < df["dc_low"]) & (df["close"] < df["ema_trend"])
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["exit_long"] = df["close"] < df["ema_trend"]
+        df["exit_short"] = df["close"] > df["ema_trend"]
+        return df
+`;
+  }
+
+  return `import numpy as np
+import pandas as pd
+import ta
+
+class ${cls}:
+    timeframe = "${timeframe}"
+    stoploss = ${stoploss}
+    minimal_roi = {"0": ${roiTarget}, "45": ${Number((roiTarget * 0.65).toFixed(4))}}
     pairs = ["${pair}"]
 
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df["ema_fast"] = ta.trend.ema_indicator(df["close"], window=12)
         df["ema_slow"] = ta.trend.ema_indicator(df["close"], window=26)
+        df["ema_macro"] = ta.trend.ema_indicator(df["close"], window=100)
+        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
         df["rsi"] = ta.momentum.rsi(df["close"], window=14)
-        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
-        df["bb_lower"] = bb.bollinger_lband()
-        df["bb_upper"] = bb.bollinger_hband()
+        df["atr_pct"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14) / df["close"]
+        df["vol_ma"] = df["volume"].rolling(20).mean()
         return df
 
     def populate_entry_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        df["enter_long"] = (
-            (df["ema_fast"] > df["ema_slow"])
-            & (df["rsi"] > 45)
-            & (df["rsi"] < 68)
-            & (df["close"] > df["bb_lower"])
-        )
-        df["enter_short"] = (
-            (df["ema_fast"] < df["ema_slow"])
-            & (df["rsi"] < 55)
-            & (df["rsi"] > 32)
-            & (df["close"] < df["bb_upper"])
-        )
+        regime = (df["adx"] >= 22) & (df["atr_pct"] > 0.0018) & (df["atr_pct"] < 0.042)
+        vol_ok = df["volume"] > df["vol_ma"] * 1.15
+        df["enter_long"] = regime & vol_ok & (df["ema_fast"] > df["ema_slow"]) & (df["close"] > df["ema_macro"]) & (df["rsi"] > 48) & (df["rsi"] < 68)
+        df["enter_short"] = regime & vol_ok & (df["ema_fast"] < df["ema_slow"]) & (df["close"] < df["ema_macro"]) & (df["rsi"] < 52) & (df["rsi"] > 32)
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["exit_long"] = (df["ema_fast"] < df["ema_slow"]) | (df["rsi"] > 78)
+        df["exit_short"] = (df["ema_fast"] > df["ema_slow"]) | (df["rsi"] < 22)
         return df
 `;
-
-const strategies: Strategy[] = [
-  {
-    id: STRAT_BTC_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    name: 'BTC EMA-RSI Momentum v3',
-    version: 3,
-    status: 'LIVE_APPROVED',
-    origin: 'AI_PIPELINE',
-    sourceCode: SAMPLE_STRATEGY_CODE('B-BTC_USDT', 'BtcEmaRsiMomentum'),
-    marketType: 'FUTURES',
-    instrument: 'B-BTC_USDT',
-    marginCurrency: 'INR',
-    config: {
-      timeframe: '5m',
-      pairs: ['B-BTC_USDT'],
-      provider_used: 'GEMINI',
-      model_used: 'gemini-flash-latest',
-    },
-    createdAt: daysAgo(6),
-  },
-  {
-    id: STRAT_ETH_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    name: 'ETH Volatility Breakout v2',
-    version: 2,
-    status: 'PAPER_TRADING',
-    origin: 'AI_PIPELINE',
-    sourceCode: SAMPLE_STRATEGY_CODE('B-ETH_USDT', 'EthVolatilityBreakout'),
-    marketType: 'FUTURES',
-    instrument: 'B-ETH_USDT',
-    marginCurrency: 'INR',
-    config: {
-      timeframe: '5m',
-      pairs: ['B-ETH_USDT'],
-      provider_used: 'GROQ',
-      model_used: 'llama-3.3-70b-versatile',
-    },
-    createdAt: daysAgo(3),
-  },
-  {
-    id: STRAT_SOL_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    name: 'SOL Bollinger MeanRev v1',
-    version: 1,
-    status: 'PAPER_TRADING',
-    origin: 'AI_PIPELINE',
-    sourceCode: SAMPLE_STRATEGY_CODE('B-SOL_USDT', 'SolBollingerMeanRev'),
-    marketType: 'FUTURES',
-    instrument: 'B-SOL_USDT',
-    marginCurrency: 'INR',
-    config: {
-      timeframe: '15m',
-      pairs: ['B-SOL_USDT'],
-      provider_used: 'GEMINI',
-      model_used: 'gemini-2.0-flash',
-    },
-    createdAt: daysAgo(1),
-  },
-];
-
-function makeBacktestTrades(daysWindow: number) {
-  const out: { entry_time: string; exit_time: string; profit_ratio: number }[] = [];
-  for (let i = 0; i < 8; i++) {
-    const startH = (daysWindow - 1) * 24 - i * 18;
-    const endH = startH - 3;
-    const win = i % 4 !== 2;
-    out.push({
-      entry_time: hoursAgo(Math.max(4, startH)),
-      exit_time: hoursAgo(Math.max(1, endH)),
-      profit_ratio: win ? 0.018 : -0.011,
-    });
-  }
-  return out;
 }
 
-const backtests: Backtest[] = [
-  {
-    id: '66666666-6666-4666-8666-666666666601',
-    tenantId: DEFAULT_TENANT_ID,
-    strategyId: STRAT_BTC_ID,
-    timeframe: '5m',
-    pairs: ['B-BTC_USDT'],
-    rangeStart: daysAgo(5),
-    rangeEnd: new Date(nowMs).toISOString(),
-    status: 'DONE',
-    metrics: {
-      profit_total_pct: 14.8,
-      trades: 42,
-      wins: 29,
-      win_rate: 0.69,
-      max_drawdown_pct: 4.2,
-      profit_factor: 1.85,
-      sharpe: 2.14,
-      timeframe: '5m',
-    },
-    trades: makeBacktestTrades(5),
-    error: null,
-    createdAt: daysAgo(5),
-  },
-  {
-    id: '66666666-6666-4666-8666-666666666602',
-    tenantId: DEFAULT_TENANT_ID,
-    strategyId: STRAT_ETH_ID,
-    timeframe: '5m',
-    pairs: ['B-ETH_USDT'],
-    rangeStart: daysAgo(5),
-    rangeEnd: new Date(nowMs).toISOString(),
-    status: 'DONE',
-    metrics: {
-      profit_total_pct: 9.4,
-      trades: 36,
-      wins: 22,
-      win_rate: 0.611,
-      max_drawdown_pct: 6.1,
-      profit_factor: 1.52,
-      sharpe: 1.68,
-      timeframe: '5m',
-    },
-    trades: makeBacktestTrades(5),
-    error: null,
-    createdAt: daysAgo(3),
-  },
-  {
-    id: '66666666-6666-4666-8666-666666666603',
-    tenantId: DEFAULT_TENANT_ID,
-    strategyId: STRAT_SOL_ID,
-    timeframe: '5m',
-    pairs: ['B-SOL_USDT'],
-    rangeStart: daysAgo(5),
-    rangeEnd: new Date(nowMs).toISOString(),
-    status: 'DONE',
-    metrics: {
-      profit_total_pct: 6.7,
-      trades: 31,
-      wins: 18,
-      win_rate: 0.581,
-      max_drawdown_pct: 7.4,
-      profit_factor: 1.38,
-      sharpe: 1.42,
-      timeframe: '5m',
-    },
-    trades: makeBacktestTrades(5),
-    error: null,
-    createdAt: daysAgo(1),
-  },
-];
-
-const bots: Bot[] = [
-  {
-    id: BOT_BTC_LIVE_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    strategyId: STRAT_BTC_ID,
-    exchangeKeyId: null,
-    name: 'BTC INR Live Momentum',
-    mode: 'LIVE',
-    marketType: 'FUTURES',
-    pairs: ['B-BTC_USDT'],
-    stakeCurrency: 'INR',
-    stakeAmount: 2500,
-    maxOpenTrades: 3,
-    leverage: 3,
-    status: 'RUNNING',
-    killSwitch: false,
-    marginCurrency: 'INR',
-    createdAt: daysAgo(4),
-  },
-  {
-    id: BOT_ETH_PAPER_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    strategyId: STRAT_ETH_ID,
-    exchangeKeyId: null,
-    name: 'ETH INR Paper Breakout',
-    mode: 'PAPER',
-    marketType: 'FUTURES',
-    pairs: ['B-ETH_USDT'],
-    stakeCurrency: 'INR',
-    stakeAmount: 1000,
-    maxOpenTrades: 3,
-    leverage: 3,
-    status: 'RUNNING',
-    killSwitch: false,
-    marginCurrency: 'INR',
-    createdAt: daysAgo(3),
-  },
-  {
-    id: BOT_SOL_PAPER_ID,
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    strategyId: STRAT_SOL_ID,
-    exchangeKeyId: null,
-    name: 'SOL INR Paper MeanRev',
-    mode: 'PAPER',
-    marketType: 'FUTURES',
-    pairs: ['B-SOL_USDT'],
-    stakeCurrency: 'INR',
-    stakeAmount: 1000,
-    maxOpenTrades: 3,
-    leverage: 3,
-    status: 'RUNNING',
-    killSwitch: false,
-    marginCurrency: 'INR',
-    createdAt: daysAgo(1),
-  },
-];
-
-const positions: Position[] = [
-  {
-    id: '77777777-7777-4777-8777-777777777701',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_BTC_LIVE_ID,
-    strategyId: STRAT_BTC_ID,
-    mode: 'LIVE',
-    pair: 'B-BTC_USDT',
-    side: 'LONG',
-    quantity: 0.002,
-    entryPrice: 91450,
-    exitPrice: null,
-    slPrice: 90260,
-    targetPrice: 93280,
-    status: 'OPEN',
-    leverage: 3,
-    realizedPnl: null,
-    marginInr: 6218.6,
-    marginCurrency: 'INR',
-    openedAt: hoursAgo(3),
-    closedAt: null,
-  },
-  {
-    id: '77777777-7777-4777-8777-777777777702',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_BTC_LIVE_ID,
-    strategyId: STRAT_BTC_ID,
-    mode: 'LIVE',
-    pair: 'B-BTC_USDT',
-    side: 'LONG',
-    quantity: 0.002,
-    entryPrice: 89800,
-    exitPrice: 91250,
-    slPrice: 88630,
-    targetPrice: 91600,
-    status: 'CLOSED',
-    leverage: 3,
-    realizedPnl: 295.8,
-    marginInr: 6106.4,
-    marginCurrency: 'INR',
-    openedAt: hoursAgo(28),
-    closedAt: hoursAgo(22),
-  },
-  {
-    id: '77777777-7777-4777-8777-777777777703',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_ETH_PAPER_ID,
-    strategyId: STRAT_ETH_ID,
-    mode: 'PAPER',
-    pair: 'B-ETH_USDT',
-    side: 'LONG',
-    quantity: 0.05,
-    entryPrice: 3120,
-    exitPrice: null,
-    slPrice: 3079.4,
-    targetPrice: 3182.4,
-    status: 'OPEN',
-    leverage: 3,
-    realizedPnl: null,
-    marginInr: 5304,
-    marginCurrency: 'INR',
-    openedAt: hoursAgo(2),
-    closedAt: null,
-  },
-  {
-    id: '77777777-7777-4777-8777-777777777704',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_ETH_PAPER_ID,
-    strategyId: STRAT_ETH_ID,
-    mode: 'PAPER',
-    pair: 'B-ETH_USDT',
-    side: 'SHORT',
-    quantity: 0.05,
-    entryPrice: 3185,
-    exitPrice: 3122,
-    slPrice: 3226.4,
-    targetPrice: 3121.3,
-    status: 'CLOSED',
-    leverage: 3,
-    realizedPnl: 321.3,
-    marginInr: 5414.5,
-    marginCurrency: 'INR',
-    openedAt: hoursAgo(14),
-    closedAt: hoursAgo(9),
-  },
-  {
-    id: '77777777-7777-4777-8777-777777777705',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_SOL_PAPER_ID,
-    strategyId: STRAT_SOL_ID,
-    mode: 'PAPER',
-    pair: 'B-SOL_USDT',
-    side: 'LONG',
-    quantity: 0.8,
-    entryPrice: 184.5,
-    exitPrice: 188.2,
-    slPrice: 182.1,
-    targetPrice: 188.19,
-    status: 'CLOSED',
-    leverage: 3,
-    realizedPnl: 301.92,
-    marginInr: 5018.4,
-    marginCurrency: 'INR',
-    openedAt: hoursAgo(10),
-    closedAt: hoursAgo(6),
-  },
-];
-
-const orders: TradeOrder[] = [
-  {
-    id: '88888888-8888-4888-8888-888888888801',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_BTC_LIVE_ID,
-    strategyId: STRAT_BTC_ID,
-    mode: 'LIVE',
-    pair: 'B-BTC_USDT',
-    side: 'BUY',
-    orderType: 'MARKET',
-    status: 'FILLED',
-    price: 91450,
-    avgPrice: 91450,
-    quantity: 0.002,
-    filledQty: 0.002,
-    sizeInr: 18655.8,
-    error: null,
-    createdAt: hoursAgo(3),
-  },
-  {
-    id: '88888888-8888-4888-8888-888888888802',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_BTC_LIVE_ID,
-    strategyId: STRAT_BTC_ID,
-    mode: 'LIVE',
-    pair: 'B-BTC_USDT',
-    side: 'SELL',
-    orderType: 'MARKET',
-    status: 'FILLED',
-    price: 91250,
-    avgPrice: 91250,
-    quantity: 0.002,
-    filledQty: 0.002,
-    sizeInr: 18615.0,
-    error: null,
-    createdAt: hoursAgo(22),
-  },
-  {
-    id: '88888888-8888-4888-8888-888888888803',
-    tenantId: DEFAULT_TENANT_ID,
-    userId: DEFAULT_USER_ID,
-    botId: BOT_ETH_PAPER_ID,
-    strategyId: STRAT_ETH_ID,
-    mode: 'PAPER',
-    pair: 'B-ETH_USDT',
-    side: 'BUY',
-    orderType: 'MARKET',
-    status: 'FILLED',
-    price: 3120,
-    avgPrice: 3120,
-    quantity: 0.05,
-    filledQty: 0.05,
-    sizeInr: 15912.0,
-    error: null,
-    createdAt: hoursAgo(2),
-  },
-];
-
-const auditLogs: AuditLog[] = [
-  {
-    id: '99999999-9999-4999-8999-999999999901',
-    tenantId: DEFAULT_TENANT_ID,
-    entityType: 'STRATEGY',
-    entityId: STRAT_ETH_ID,
-    action: 'AUTO_LIVE_SKIPPED_PAPER_GATE',
-    details: {
-      reason: 'Paper win rate progress: 34/100 closed trades (64.7% WR)',
-    },
-    createdAt: hoursAgo(1),
-  },
-  {
-    id: '99999999-9999-4999-8999-999999999902',
-    tenantId: DEFAULT_TENANT_ID,
-    entityType: 'STRATEGY',
-    entityId: STRAT_SOL_ID,
-    action: 'AUTO_LIVE_SKIPPED_PAPER_GATE',
-    details: {
-      reason: 'Paper win rate progress: 18/100 closed trades (61.1% WR)',
-    },
-    createdAt: hoursAgo(2),
-  },
-];
-
-// Synthetic paper stats baseline so progress bars reflect multi-trade history
-const strategyPaperBaseline = new Map<
-  string,
-  { closedTrades: number; wins: number; totalPnl: number }
->([
-  [STRAT_BTC_ID, { closedTrades: 104, wins: 71, totalPnl: 4820.5 }],
-  [STRAT_ETH_ID, { closedTrades: 33, wins: 21, totalPnl: 1290.2 }],
-  [STRAT_SOL_ID, { closedTrades: 17, wins: 10, totalPnl: 412.8 }],
-]);
+// Strict real-data stores: start empty with zero fabricated/dummy records.
+const strategies: Strategy[] = [];
+const backtests: Backtest[] = [];
+const bots: Bot[] = [];
+const positions: Position[] = [];
+const orders: TradeOrder[] = [];
+const auditLogs: AuditLog[] = [];
 
 // ---------------------------------------------------------------------------
-// CoinDCX Public Market Data Client (Real HTTP + Safe Cache & Fallback)
+// CoinDCX Public & Private Signed Client
 // ---------------------------------------------------------------------------
-
-const FALLBACK_INSTRUMENTS = [
-  'B-BTC_USDT',
-  'B-ETH_USDT',
-  'B-SOL_USDT',
-  'B-XRP_USDT',
-  'B-BNB_USDT',
-  'B-DOGE_USDT',
-  'B-ADA_USDT',
-  'B-AVAX_USDT',
-  'B-LINK_USDT',
-  'B-SUI_USDT',
-  'B-DOT_USDT',
-  'B-NEAR_USDT',
-];
 
 let instrumentsCache: { list: string[]; fetchedAt: number } | null = null;
 const priceCache = new Map<string, { price: number; fetchedAt: number }>();
+let usdtInrCache: { rate: number; fetchedAt: number } | null = null;
 
 function toFuturesResolution(timeframe: string): string {
   switch (timeframe) {
@@ -871,9 +602,9 @@ async function fetchActiveInstruments(marginCurrency = 'INR'): Promise<string[]>
       }
     }
   } catch {
-    // Fallback below
+    // Upstream failure returns empty instead of fabricated instruments
   }
-  return FALLBACK_INSTRUMENTS;
+  return instrumentsCache?.list ?? [];
 }
 
 interface CandleDto {
@@ -883,53 +614,6 @@ interface CandleDto {
   low: number;
   close: number;
   volume: number;
-}
-
-function generateFallbackCandles(
-  pair: string,
-  resolution: string,
-  fromMs: number,
-  toMs: number,
-  limit: number,
-): CandleDto[] {
-  const stepMs =
-    resolution === '1'
-      ? 60_000
-      : resolution === '5'
-        ? 300_000
-        : resolution === '1D'
-          ? 86_400_000
-          : 3_600_000;
-  const count = Math.min(Math.max(40, Math.floor((toMs - fromMs) / stepMs)), Math.min(limit, 300));
-  const baseSeed = pair.includes('BTC')
-    ? 91500
-    : pair.includes('ETH')
-      ? 3135
-      : pair.includes('SOL')
-        ? 186
-        : 12;
-  let price = baseSeed;
-  const out: CandleDto[] = [];
-  const start = toMs - count * stepMs;
-  for (let i = 0; i < count; i++) {
-    const t = Math.floor((start + i * stepMs) / stepMs) * stepMs;
-    const wave = Math.sin((i + pair.length) * 0.35) * 0.004 + Math.cos(i * 0.13) * 0.002;
-    const open = price;
-    const close = Number((open * (1 + wave)).toFixed(6));
-    const spread = Math.abs(close - open) + open * 0.0022;
-    const high = Number((Math.max(open, close) + spread * 0.6).toFixed(6));
-    const low = Number((Math.min(open, close) - spread * 0.6).toFixed(6));
-    price = close;
-    out.push({
-      ts: new Date(t).toISOString(),
-      open,
-      high,
-      low,
-      close,
-      volume: Number((100 + Math.abs(Math.sin(i)) * 450).toFixed(2)),
-    });
-  }
-  return out;
 }
 
 async function fetchCandles(
@@ -985,46 +669,308 @@ async function fetchCandles(
       }
     }
   } catch {
-    // Fallback below
+    // Return empty rather than synthetic candles
   }
-
-  const fb = generateFallbackCandles(pair, resolution, fromMs, toMs, limit);
-  if (fb.length > 0) {
-    priceCache.set(pair, { price: fb[fb.length - 1].close, fetchedAt: Date.now() });
-  }
-  return fb;
+  return [];
 }
 
-async function getLastPrice(pair: string, fallback: number): Promise<number> {
+async function getLastPrice(pair: string, fallback = 0): Promise<number> {
   const cached = priceCache.get(pair);
-  if (cached && Date.now() - cached.fetchedAt < 10_000) return cached.price;
+  if (cached && Date.now() - cached.fetchedAt < 5_000) return cached.price;
   const to = new Date();
   const from = new Date(to.getTime() - 2 * 3_600_000);
-  const candles = await fetchCandles(pair, '5m', from.toISOString(), to.toISOString(), 10);
+  const candles = await fetchCandles(pair, '1m', from.toISOString(), to.toISOString(), 15);
   if (candles.length > 0) return candles[candles.length - 1].close;
+  const fallbackCandles = await fetchCandles(pair, '5m', from.toISOString(), to.toISOString(), 15);
+  if (fallbackCandles.length > 0) return fallbackCandles[fallbackCandles.length - 1].close;
   return fallback;
 }
 
-const USDT_INR_SETTLE = 102;
+async function getUsdtInrRate(): Promise<number> {
+  if (usdtInrCache && Date.now() - usdtInrCache.fetchedAt < 10_000) {
+    return usdtInrCache.rate;
+  }
+  try {
+    const res = await fetch('https://api.coindcx.com/exchange/ticker', {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      const list = (await res.json()) as Array<{ market?: string; last_price?: string | number }>;
+      if (Array.isArray(list)) {
+        const hit = list.find((t) => String(t.market || '').toUpperCase() === 'USDTINR');
+        const rate = Number(hit?.last_price || 0);
+        if (Number.isFinite(rate) && rate > 0) {
+          usdtInrCache = { rate, fetchedAt: Date.now() };
+          return rate;
+        }
+      }
+    }
+  } catch {
+    // Keep last known if recent
+  }
+  return usdtInrCache?.rate ?? 0;
+}
+
+function getActiveCoinDcxCredentials(tenantId: string, userId: string) {
+  const key = exchangeKeys.find(
+    (k) =>
+      k.tenantId === tenantId &&
+      k.userId === userId &&
+      k.exchange === 'COINDCX' &&
+      k.status === 'ACTIVE',
+  );
+  if (!key) return null;
+  const apiKey = decryptSecret(key.apiKeyEnc);
+  const apiSecret = decryptSecret(key.apiSecretEnc);
+  if (!apiKey || !apiSecret) return null;
+  return { key, apiKey, apiSecret };
+}
+
+async function coindcxSignedRequest<T>(
+  method: 'GET' | 'POST',
+  apiPath: string,
+  payloadObj: Record<string, unknown>,
+  apiKey: string,
+  apiSecret: string,
+): Promise<T> {
+  const payloadJson = JSON.stringify(payloadObj);
+  const signature = crypto
+    .createHmac('sha256', apiSecret)
+    .update(payloadJson)
+    .digest('hex');
+  const res = await fetch(`https://api.coindcx.com${apiPath}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-AUTH-APIKEY': apiKey,
+      'X-AUTH-SIGNATURE': signature,
+    },
+    body: payloadJson,
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  let parsed: unknown = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = { message: text };
+  }
+  if (!res.ok) {
+    const errMsg =
+      (parsed && typeof parsed === 'object' && 'message' in parsed
+        ? String((parsed as { message?: unknown }).message || '')
+        : '') || `CoinDCX API ${res.status} on ${apiPath}`;
+    throw new Error(errMsg);
+  }
+  return parsed as T;
+}
+
+interface CoinDcxWalletRow {
+  currency_short_name?: string;
+  balance?: string | number;
+  locked_balance?: string | number;
+}
+
+interface CoinDcxPositionRow {
+  id?: string;
+  pair?: string;
+  active_pos?: string | number;
+  avg_price?: string | number;
+  mark_price?: string | number;
+  locked_margin?: string | number;
+  leverage?: string | number;
+  stop_loss_price?: string | number | null;
+  take_profit_price?: string | number | null;
+  settlement_currency_avg_price?: string | number;
+  margin_currency_short_name?: string;
+  realized_pnl?: string | number | null;
+  pnl?: string | number | null;
+  updated_at?: string | number;
+  created_at?: string | number;
+}
+
+interface CoinDcxOrderRow {
+  id?: string;
+  pair?: string;
+  side?: string;
+  order_type?: string;
+  status?: string;
+  price?: string | number;
+  avg_price?: string | number;
+  total_quantity?: string | number;
+  remaining_quantity?: string | number;
+  filled_quantity?: string | number;
+  settlement_currency_avg_price?: string | number;
+  fee_amount?: string | number;
+  created_at?: string | number;
+  updated_at?: string | number;
+}
+
+function toIsoTs(val: unknown): string {
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    return new Date(val < 1e12 ? val * 1000 : val).toISOString();
+  }
+  if (typeof val === 'string' && val.trim()) {
+    const num = Number(val);
+    if (Number.isFinite(num) && num > 0) {
+      return new Date(num < 1e12 ? num * 1000 : num).toISOString();
+    }
+    const d = new Date(val);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+async function fetchLiveCoinDcxPositions(apiKey: string, apiSecret: string) {
+  const [raw, usdtInr] = await Promise.all([
+    coindcxSignedRequest<CoinDcxPositionRow[]>(
+      'POST',
+      '/exchange/v1/derivatives/futures/positions',
+      {
+        timestamp: Date.now(),
+        page: '1',
+        size: '50',
+        margin_currency_short_name: ['INR', 'USDT'],
+      },
+      apiKey,
+      apiSecret,
+    ),
+    getUsdtInrRate(),
+  ]);
+  const list = Array.isArray(raw) ? raw : [];
+  const mapped = await Promise.all(
+    list
+      .filter((n) => n && n.pair)
+      .map(async (n) => {
+        const pair = String(n.pair);
+        const activePos = Number(n.active_pos || 0);
+        const isOpen = Math.abs(activePos) > 0;
+        const side = activePos < 0 ? 'SHORT' : 'LONG';
+        const qty = Math.abs(activePos);
+        const avgPrice = Number(n.avg_price || 0);
+        const settle =
+          Number(n.settlement_currency_avg_price || 0) ||
+          (String(n.margin_currency_short_name || 'INR').toUpperCase() === 'USDT'
+            ? usdtInr || 1
+            : usdtInr);
+        const exchangeMark = Number(n.mark_price || 0);
+        const candleMark = isOpen ? await getLastPrice(pair, exchangeMark || avgPrice) : 0;
+        const markPrice = candleMark > 0 ? candleMark : exchangeMark;
+        const lockedUsdt = Number(n.locked_margin || 0);
+        const marginInr = settle > 0 ? Number((lockedUsdt * settle).toFixed(2)) : null;
+        const sizeInr =
+          isOpen && markPrice > 0 && settle > 0
+            ? Number((qty * markPrice * settle).toFixed(2))
+            : null;
+        const sign = activePos < 0 ? -1 : 1;
+        const unrealizedPnl =
+          isOpen && avgPrice > 0 && markPrice > 0 && settle > 0
+            ? Number(((markPrice - avgPrice) * qty * sign * settle).toFixed(2))
+            : null;
+        const realizedRaw = n.realized_pnl ?? n.pnl;
+        const realizedPnl =
+          !isOpen && realizedRaw != null && Number.isFinite(Number(realizedRaw))
+            ? Number((Number(realizedRaw) * (String(n.margin_currency_short_name || 'INR').toUpperCase() === 'USDT' ? usdtInr || 1 : 1)).toFixed(2))
+            : null;
+        const roePct =
+          unrealizedPnl != null && marginInr != null && marginInr > 0
+            ? Number(((unrealizedPnl * 100) / marginInr).toFixed(2))
+            : null;
+        return {
+          id: String(n.id || `${pair}-${side}`),
+          botId: null,
+          strategyId: null,
+          mode: 'LIVE',
+          pair,
+          side,
+          quantity: qty,
+          entryPrice: avgPrice,
+          exitPrice: isOpen ? null : exchangeMark || null,
+          slPrice: n.stop_loss_price != null ? Number(n.stop_loss_price) : null,
+          targetPrice: n.take_profit_price != null ? Number(n.take_profit_price) : null,
+          status: isOpen ? 'OPEN' : 'CLOSED',
+          leverage: n.leverage != null ? Number(n.leverage) : null,
+          realizedPnl,
+          unrealizedPnl,
+          pnl: isOpen ? unrealizedPnl : realizedPnl,
+          markPrice: isOpen ? markPrice : null,
+          marginInr,
+          sizeInr,
+          roePct,
+          marginCurrency: String(n.margin_currency_short_name || 'INR').toUpperCase(),
+          openedAt: toIsoTs(n.created_at ?? n.updated_at),
+          closedAt: isOpen ? null : toIsoTs(n.updated_at ?? n.created_at),
+        };
+      }),
+  );
+  return mapped.filter((p) => p.status === 'OPEN' || p.realizedPnl != null);
+}
+
+async function fetchLiveCoinDcxOrders(apiKey: string, apiSecret: string) {
+  const [resp, usdtInr] = await Promise.all([
+    coindcxSignedRequest<
+      CoinDcxOrderRow[] | { orders?: CoinDcxOrderRow[]; data?: CoinDcxOrderRow[] }
+    >(
+      'POST',
+      '/exchange/v1/derivatives/futures/orders',
+      {
+        timestamp: Date.now(),
+        page: '1',
+        size: '50',
+        margin_currency_short_name: ['INR', 'USDT'],
+      },
+      apiKey,
+      apiSecret,
+    ),
+    getUsdtInrRate(),
+  ]);
+  const list = Array.isArray(resp)
+    ? resp
+    : Array.isArray(resp?.orders)
+      ? resp.orders
+      : Array.isArray(resp?.data)
+        ? resp.data
+        : [];
+  return list.map((o) => {
+    const qty = Number(o.total_quantity || 0);
+    const rem = Number(o.remaining_quantity || 0);
+    const filledQty =
+      o.filled_quantity != null ? Number(o.filled_quantity) : Math.max(0, qty - rem);
+    const avgPrice = Number(o.avg_price || 0) || Number(o.price || 0);
+    const settle = Number(o.settlement_currency_avg_price || 0) || usdtInr;
+    const sizeInr =
+      qty > 0 && avgPrice > 0 && settle > 0
+        ? Number((qty * avgPrice * settle).toFixed(2))
+        : null;
+    return {
+      id: String(o.id || crypto.randomUUID()),
+      botId: null,
+      strategyId: null,
+      mode: 'LIVE',
+      pair: String(o.pair || ''),
+      side: String(o.side || '').toUpperCase(),
+      orderType: String(o.order_type || 'MARKET').toUpperCase(),
+      status: String(o.status || 'OPEN').toUpperCase(),
+      price: Number(o.price || avgPrice || 0),
+      avgPrice: avgPrice || null,
+      quantity: qty,
+      filledQty,
+      sizeInr,
+      error: null,
+      createdAt: toIsoTs(o.created_at ?? o.updated_at),
+    };
+  });
+}
 
 function computePaperProgress(strategyId: string) {
-  const base = strategyPaperBaseline.get(strategyId) ?? {
-    closedTrades: 0,
-    wins: 0,
-    totalPnl: 0,
-  };
-  const liveRows = positions.filter(
+  const paperRows = positions.filter(
     (p) => p.strategyId === strategyId && p.mode === 'PAPER',
   );
-  const extraClosed = liveRows.filter((p) => p.status === 'CLOSED');
-  const openPositions = liveRows.filter((p) => p.status === 'OPEN').length;
-  const closedTrades = base.closedTrades + extraClosed.length;
-  const wins =
-    base.wins +
-    extraClosed.filter((p) => (p.realizedPnl ?? 0) > 0).length;
-  const totalPnl =
-    base.totalPnl +
-    extraClosed.reduce((sum, p) => sum + (p.realizedPnl ?? 0), 0);
+  const closed = paperRows.filter((p) => p.status === 'CLOSED');
+  const openPositions = paperRows.filter((p) => p.status === 'OPEN').length;
+  const closedTrades = closed.length;
+  const wins = closed.filter((p) => (p.realizedPnl ?? 0) > 0).length;
+  const totalPnl = closed.reduce((sum, p) => sum + (p.realizedPnl ?? 0), 0);
   return {
     closedTrades,
     wins,
@@ -1060,6 +1006,19 @@ function toStrategyView(s: Strategy, includeCode = false) {
 // ---------------------------------------------------------------------------
 
 const app = express();
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  );
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 
 interface AuthedRequest extends Request {
@@ -1201,8 +1160,66 @@ app.get('/api/v1/market/candles', async (req, res) => {
   res.json(candles);
 });
 
-// Portfolio routes
+interface TickerSnapshot {
+  pair: string;
+  symbol: string;
+  lastPrice: number;
+  changePct: number;
+  high24h: number;
+  low24h: number;
+  volume: number;
+}
+
+let tickerCache: { data: TickerSnapshot[]; fetchedAt: number } | null = null;
+const TICKER_PAIRS = [
+  'B-BTC_USDT',
+  'B-ETH_USDT',
+  'B-SOL_USDT',
+  'B-XRP_USDT',
+  'B-BNB_USDT',
+  'B-DOGE_USDT',
+];
+
+app.get('/api/v1/market/tickers', async (_req, res) => {
+  if (tickerCache && Date.now() - tickerCache.fetchedAt < 5000) {
+    res.json(tickerCache.data);
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const fromIso = daysAgo(1);
+  const rows = await Promise.all(
+    TICKER_PAIRS.map(async (pair): Promise<TickerSnapshot | null> => {
+      const candles = await fetchCandles(pair, '1h', fromIso, nowIso, 25);
+      if (candles.length === 0) return null;
+      const first = candles[0];
+      const last = candles[candles.length - 1];
+      const high24h = Math.max(...candles.map((c) => c.high));
+      const low24h = Math.min(...candles.map((c) => c.low));
+      const volume = candles.reduce((s, c) => s + (c.volume || 0), 0);
+      const changePct =
+        first.open > 0
+          ? Number((((last.close - first.open) / first.open) * 100).toFixed(2))
+          : 0;
+      const symbol = pair.replace(/^B-/, '').replace(/_USDT$/, '');
+      return {
+        pair,
+        symbol,
+        lastPrice: last.close,
+        changePct,
+        high24h,
+        low24h,
+        volume: Number(volume.toFixed(2)),
+      };
+    }),
+  );
+  const data = rows.filter((x): x is TickerSnapshot => x !== null);
+  tickerCache = { data, fetchedAt: Date.now() };
+  res.json(data);
+});
+
+// Portfolio routes (LIVE strictly requires active CoinDCX API key; PAPER uses live mark pricing)
 async function enrichPosition(pos: Position) {
+  const settle = (await getUsdtInrRate()) || 100;
   if (pos.status !== 'OPEN') {
     return {
       ...pos,
@@ -1210,7 +1227,7 @@ async function enrichPosition(pos: Position) {
       unrealizedPnl: null,
       markPrice: null,
       sizeInr: pos.exitPrice
-        ? Number((pos.quantity * pos.exitPrice * USDT_INR_SETTLE).toFixed(2))
+        ? Number((pos.quantity * pos.exitPrice * settle).toFixed(2))
         : null,
       roePct: null,
     };
@@ -1218,9 +1235,9 @@ async function enrichPosition(pos: Position) {
   const mark = await getLastPrice(pos.pair, pos.entryPrice);
   const sign = pos.side === 'SHORT' ? -1 : 1;
   const unrealized = Number(
-    ((mark - pos.entryPrice) * pos.quantity * sign * USDT_INR_SETTLE).toFixed(2),
+    ((mark - pos.entryPrice) * pos.quantity * sign * settle).toFixed(2),
   );
-  const sizeInr = Number((pos.quantity * mark * USDT_INR_SETTLE).toFixed(2));
+  const sizeInr = Number((pos.quantity * mark * settle).toFixed(2));
   const marginInr = pos.marginInr ?? Number((sizeInr / Math.max(1, pos.leverage)).toFixed(2));
   const roePct =
     marginInr > 0 ? Number(((unrealized * 100) / marginInr).toFixed(2)) : 0;
@@ -1237,8 +1254,29 @@ async function enrichPosition(pos: Position) {
 
 app.get('/api/v1/portfolio/positions', requireAuth, async (req: AuthedRequest, res) => {
   const mode = String(req.query.mode || 'LIVE').toUpperCase();
+  if (mode === 'LIVE') {
+    const creds = getActiveCoinDcxCredentials(req.principal!.tenantId, req.principal!.userId);
+    if (!creds) {
+      res.json([]);
+      return;
+    }
+    try {
+      const liveList = await fetchLiveCoinDcxPositions(creds.apiKey, creds.apiSecret);
+      res.json(liveList);
+    } catch (e) {
+      res.status(502).json({
+        message: e instanceof Error ? e.message : 'Failed to fetch live CoinDCX positions',
+      });
+    }
+    return;
+  }
   const list = positions
-    .filter((p) => p.tenantId === req.principal!.tenantId && p.mode === mode)
+    .filter(
+      (p) =>
+        p.tenantId === req.principal!.tenantId &&
+        p.userId === req.principal!.userId &&
+        p.mode === 'PAPER',
+    )
     .sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
   const enriched = await Promise.all(list.map(enrichPosition));
   res.json(enriched);
@@ -1246,16 +1284,80 @@ app.get('/api/v1/portfolio/positions', requireAuth, async (req: AuthedRequest, r
 
 app.get('/api/v1/portfolio/orders', requireAuth, async (req: AuthedRequest, res) => {
   const mode = String(req.query.mode || 'LIVE').toUpperCase();
+  if (mode === 'LIVE') {
+    const creds = getActiveCoinDcxCredentials(req.principal!.tenantId, req.principal!.userId);
+    if (!creds) {
+      res.json([]);
+      return;
+    }
+    try {
+      const liveOrders = await fetchLiveCoinDcxOrders(creds.apiKey, creds.apiSecret);
+      res.json(liveOrders);
+    } catch (e) {
+      res.status(502).json({
+        message: e instanceof Error ? e.message : 'Failed to fetch live CoinDCX orders',
+      });
+    }
+    return;
+  }
   const list = orders
-    .filter((o) => o.tenantId === req.principal!.tenantId && o.mode === mode)
+    .filter(
+      (o) =>
+        o.tenantId === req.principal!.tenantId &&
+        o.userId === req.principal!.userId &&
+        o.mode === 'PAPER',
+    )
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   res.json(list);
 });
 
 app.get('/api/v1/portfolio/summary', requireAuth, async (req: AuthedRequest, res) => {
   const mode = String(req.query.mode || 'LIVE').toUpperCase();
+  if (mode === 'LIVE') {
+    const creds = getActiveCoinDcxCredentials(req.principal!.tenantId, req.principal!.userId);
+    if (!creds) {
+      res.json({
+        mode: 'LIVE',
+        hasApiKey: false,
+        openPositions: 0,
+        closedPositions: 0,
+        realizedPnl: 0,
+        unrealizedPnl: 0,
+        winRate: 0,
+      });
+      return;
+    }
+    try {
+      const liveList = await fetchLiveCoinDcxPositions(creds.apiKey, creds.apiSecret);
+      const openPositions = liveList.filter((p) => p.status === 'OPEN').length;
+      const closed = liveList.filter((p) => p.status === 'CLOSED');
+      const wins = closed.filter((p) => (p.realizedPnl ?? 0) > 0).length;
+      const realizedPnl = closed.reduce((s, p) => s + (p.realizedPnl ?? 0), 0);
+      const unrealizedPnl = liveList
+        .filter((p) => p.status === 'OPEN')
+        .reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
+      res.json({
+        mode: 'LIVE',
+        hasApiKey: true,
+        openPositions,
+        closedPositions: closed.length,
+        realizedPnl: Number(realizedPnl.toFixed(2)),
+        unrealizedPnl: Number(unrealizedPnl.toFixed(2)),
+        winRate: closed.length === 0 ? 0 : wins / closed.length,
+      });
+    } catch (e) {
+      res.status(502).json({
+        message: e instanceof Error ? e.message : 'Failed to summarize CoinDCX portfolio',
+      });
+    }
+    return;
+  }
+
   const list = positions.filter(
-    (p) => p.tenantId === req.principal!.tenantId && p.mode === mode,
+    (p) =>
+      p.tenantId === req.principal!.tenantId &&
+      p.userId === req.principal!.userId &&
+      p.mode === 'PAPER',
   );
   const enriched = await Promise.all(list.map(enrichPosition));
   const openPositions = enriched.filter((p) => p.status === 'OPEN').length;
@@ -1266,7 +1368,7 @@ app.get('/api/v1/portfolio/summary', requireAuth, async (req: AuthedRequest, res
     .filter((p) => p.status === 'OPEN')
     .reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
   res.json({
-    mode,
+    mode: 'PAPER',
     openPositions,
     closedPositions: closed.length,
     realizedPnl: Number(realizedPnl.toFixed(2)),
@@ -1276,39 +1378,188 @@ app.get('/api/v1/portfolio/summary', requireAuth, async (req: AuthedRequest, res
 });
 
 app.get('/api/v1/portfolio/wallet', requireAuth, async (req: AuthedRequest, res) => {
-  const openLive = await Promise.all(
-    positions
-      .filter(
-        (p) =>
-          p.tenantId === req.principal!.tenantId &&
-          p.mode === 'LIVE' &&
-          p.status === 'OPEN',
-      )
-      .map(enrichPosition),
+  const creds = getActiveCoinDcxCredentials(req.principal!.tenantId, req.principal!.userId);
+  if (!creds) {
+    res.status(404).json({ message: 'No active CoinDCX key' });
+    return;
+  }
+  try {
+    const [walletsRaw, usdtInr, livePos] = await Promise.all([
+      coindcxSignedRequest<CoinDcxWalletRow[]>(
+        'GET',
+        '/exchange/v1/derivatives/futures/wallets',
+        { timestamp: Date.now() },
+        creds.apiKey,
+        creds.apiSecret,
+      ),
+      getUsdtInrRate(),
+      fetchLiveCoinDcxPositions(creds.apiKey, creds.apiSecret).catch(() => []),
+    ]);
+    let availInr = 0;
+    let lockedInr = 0;
+    let availUsdt = 0;
+    let lockedUsdt = 0;
+    if (Array.isArray(walletsRaw)) {
+      for (const w of walletsRaw) {
+        const ccy = String(w.currency_short_name || '').toUpperCase();
+        const avail = Math.max(0, Number(w.balance || 0));
+        const locked = Math.max(0, Number(w.locked_balance || 0));
+        if (ccy === 'INR') {
+          availInr = avail;
+          lockedInr = locked;
+        } else if (ccy === 'USDT') {
+          availUsdt = avail;
+          lockedUsdt = locked;
+        }
+      }
+    }
+    const activePnl = Number(
+      livePos
+        .filter((p) => p.status === 'OPEN')
+        .reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0)
+        .toFixed(2),
+    );
+    const walletBalance = Number((availInr + lockedInr).toFixed(2));
+    const usdtWalletBalance = Number((availUsdt + lockedUsdt).toFixed(4));
+    const usdtValueInr = Number((usdtWalletBalance * usdtInr).toFixed(2));
+    const currentValue = Number((walletBalance + activePnl).toFixed(2));
+    const estTotalFutures = Number((currentValue + usdtValueInr).toFixed(2));
+    const futuresWalletBalance = Number((walletBalance + usdtValueInr).toFixed(2));
+    res.json({
+      currency: 'INR',
+      available: availInr,
+      locked: lockedInr,
+      walletBalance,
+      walletEquity: walletBalance,
+      activePnl,
+      currentValue,
+      usdtAvailable: availUsdt,
+      usdtValueInr,
+      estTotalFutures,
+      futuresWalletBalance,
+      source: 'CoinDCX futures wallets',
+    });
+  } catch (e) {
+    res.status(502).json({
+      message: e instanceof Error ? e.message : 'CoinDCX wallet request failed',
+    });
+  }
+});
+
+// Paper Trading isolated execution endpoints (live CoinDCX prices, zero real funds)
+app.post('/api/v1/paper/orders', requireAuth, async (req: AuthedRequest, res) => {
+  const pair = String(req.body?.pair || 'B-BTC_USDT').trim().toUpperCase();
+  const side = String(req.body?.side || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const quantity = Number(req.body?.quantity || 0);
+  const leverage = Math.min(20, Math.max(1, Number(req.body?.leverage || 3)));
+  if (!pair || !Number.isFinite(quantity) || quantity <= 0) {
+    res.status(400).json({ message: 'Valid pair and positive quantity are required' });
+    return;
+  }
+  const [mark, settle] = await Promise.all([getLastPrice(pair, 0), getUsdtInrRate()]);
+  if (!mark || mark <= 0 || !settle || settle <= 0) {
+    res.status(502).json({ message: `Unable to fetch live CoinDCX price for ${pair}` });
+    return;
+  }
+  const sizeInr = Number((quantity * mark * settle).toFixed(2));
+  const marginInr = Number((sizeInr / leverage).toFixed(2));
+  const slPrice = Number((mark * (side === 'SHORT' ? 1.015 : 0.985)).toFixed(mark >= 100 ? 2 : 4));
+  const targetPrice = Number((mark * (side === 'SHORT' ? 0.972 : 1.028)).toFixed(mark >= 100 ? 2 : 4));
+  const nowIso = new Date().toISOString();
+  const pos: Position = {
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    userId: req.principal!.userId,
+    botId: String(req.body?.botId || 'paper-manual'),
+    strategyId: String(req.body?.strategyId || ''),
+    mode: 'PAPER',
+    pair,
+    side,
+    quantity,
+    entryPrice: mark,
+    exitPrice: null,
+    slPrice,
+    targetPrice,
+    status: 'OPEN',
+    leverage,
+    realizedPnl: null,
+    marginInr,
+    marginCurrency: 'INR',
+    openedAt: nowIso,
+    closedAt: null,
+  };
+  positions.unshift(pos);
+  const ord: TradeOrder = {
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    userId: req.principal!.userId,
+    botId: pos.botId,
+    strategyId: pos.strategyId,
+    mode: 'PAPER',
+    pair,
+    side: side === 'LONG' ? 'BUY' : 'SELL',
+    orderType: 'MARKET',
+    status: 'FILLED',
+    price: mark,
+    avgPrice: mark,
+    quantity,
+    filledQty: quantity,
+    sizeInr,
+    error: null,
+    createdAt: nowIso,
+  };
+  orders.unshift(ord);
+  res.json(await enrichPosition(pos));
+});
+
+app.post('/api/v1/paper/positions/:id/close', requireAuth, async (req: AuthedRequest, res) => {
+  const pos = positions.find(
+    (p) =>
+      p.id === req.params.id &&
+      p.tenantId === req.principal!.tenantId &&
+      p.userId === req.principal!.userId &&
+      p.mode === 'PAPER',
   );
-  const activePnl = Number(
-    openLive.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0).toFixed(2),
-  );
-  const locked = Number(
-    openLive.reduce((s, p) => s + (p.marginInr ?? 0), 0).toFixed(2),
-  );
-  const available = 42500.0;
-  const walletBalance = Number((available + locked).toFixed(2));
-  const currentValue = Number((walletBalance + activePnl).toFixed(2));
-  res.json({
-    currency: 'INR',
-    available,
-    locked,
-    walletBalance,
-    walletEquity: walletBalance,
-    activePnl,
-    currentValue,
-    usdtAvailable: 0,
-    usdtValueInr: 0,
-    estTotalFutures: currentValue,
-    futuresWalletBalance: walletBalance,
-    source: 'Simulated INR futures wallet (in-memory)',
+  if (!pos) {
+    res.status(404).json({ message: 'Paper position not found' });
+    return;
+  }
+  if (pos.status === 'CLOSED') {
+    res.json(pos);
+    return;
+  }
+  const [exitPrice, settle] = await Promise.all([getLastPrice(pos.pair, 0), getUsdtInrRate()]);
+  if (!exitPrice || exitPrice <= 0 || !settle || settle <= 0) {
+    res.status(502).json({ message: `Unable to fetch live CoinDCX price for ${pos.pair}` });
+    return;
+  }
+  const sign = pos.side === 'SHORT' ? -1 : 1;
+  const realized = Number(((exitPrice - pos.entryPrice) * pos.quantity * sign * settle).toFixed(2));
+  const nowIso = new Date().toISOString();
+  pos.exitPrice = exitPrice;
+  pos.status = 'CLOSED';
+  pos.realizedPnl = realized;
+  pos.closedAt = nowIso;
+  orders.unshift({
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    userId: req.principal!.userId,
+    botId: pos.botId,
+    strategyId: pos.strategyId,
+    mode: 'PAPER',
+    pair: pos.pair,
+    side: pos.side === 'LONG' ? 'SELL' : 'BUY',
+    orderType: 'MARKET',
+    status: 'FILLED',
+    price: exitPrice,
+    avgPrice: exitPrice,
+    quantity: pos.quantity,
+    filledQty: pos.quantity,
+    sizeInr: Number((pos.quantity * exitPrice * settle).toFixed(2)),
+    error: null,
+    createdAt: nowIso,
   });
+  res.json(await enrichPosition(pos));
 });
 
 // Strategies & Backtests
@@ -1397,17 +1648,46 @@ app.post('/api/v1/strategies/:id/approve-live', requireAuth, (req: AuthedRequest
     return;
   }
   s.status = 'LIVE_APPROVED';
+  auditLogs.unshift({
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    entityType: 'STRATEGY',
+    entityId: s.id,
+    action: 'STRATEGY_PROMOTED_LIVE',
+    details: { reason: `${s.name} approved for LIVE trading` },
+    createdAt: new Date().toISOString(),
+  });
   res.json({ ok: true, status: s.status, reason: null, paper });
 });
 
-app.post('/api/v1/strategies/generate', requireAuth, (req: AuthedRequest, res) => {
+app.post('/api/v1/strategies/generate', requireAuth, async (req: AuthedRequest, res) => {
   const pairs: string[] = Array.isArray(req.body?.pairs) && req.body.pairs.length
-    ? req.body.pairs
+    ? req.body.pairs.map((p: unknown) => String(p).trim()).filter(Boolean)
     : ['B-BTC_USDT'];
   const pair = pairs[0];
   const timeframe = String(req.body?.timeframe || '5m');
-  const name = String(req.body?.name || `${pair.replace('B-', '').replace('_USDT', '')} AI Momentum`);
+  const rawStyle = String(req.body?.style || 'trend-following');
+  const style: StrategyStyle =
+    rawStyle === 'breakout-squeeze' || rawStyle === 'mean-reversion' || rawStyle === 'donchian-adx'
+      ? rawStyle
+      : 'trend-following';
+  const riskProfile = String(req.body?.riskProfile || 'balanced');
+  const stoploss = riskProfile === 'conservative' ? -0.012 : riskProfile === 'aggressive' ? -0.018 : -0.015;
+  const roiTarget = riskProfile === 'conservative' ? 0.022 : riskProfile === 'aggressive' ? 0.034 : 0.028;
+
+  const coin = pair.replace(/^B-/, '').replace(/_USDT$/, '').replace(/_INR$/, '');
+  const styleLabel =
+    style === 'breakout-squeeze'
+      ? 'Keltner Squeeze'
+      : style === 'mean-reversion'
+        ? 'StochRSI-VWAP MeanRev'
+        : style === 'donchian-adx'
+          ? 'Donchian-ADX Breakout'
+          : 'ATR-Regime EMA';
+  const name = String(req.body?.name || '').trim() || `${coin} ${styleLabel} v1`;
   const id = crypto.randomUUID();
+  const enabledProvider = aiProviders.find((p) => p.tenantId === req.principal!.tenantId && p.enabled);
+
   const strat: Strategy = {
     id,
     tenantId: req.principal!.tenantId,
@@ -1415,43 +1695,241 @@ app.post('/api/v1/strategies/generate', requireAuth, (req: AuthedRequest, res) =
     version: 1,
     status: 'PAPER_TRADING',
     origin: 'AI_PIPELINE',
-    sourceCode: SAMPLE_STRATEGY_CODE(pair, name),
+    sourceCode: buildStrategySource(pair, name, style, timeframe, stoploss, roiTarget),
     marketType: 'FUTURES',
     instrument: pair,
     marginCurrency: 'INR',
     config: {
       timeframe,
       pairs,
-      provider_used: 'GEMINI',
-      model_used: 'gemini-flash-latest',
+      provider_used: enabledProvider?.providerType ?? 'GEMINI',
+      model_used: enabledProvider?.models[0] ?? 'gemini-flash-latest',
+      style,
+      stoploss,
+      minimal_roi: { '0': roiTarget, '45': Number((roiTarget * 0.65).toFixed(4)) },
+      win_rate_target: 0.65,
     },
     createdAt: new Date().toISOString(),
   };
   strategies.unshift(strat);
+
+  const rangeStart = daysAgo(5);
+  const rangeEnd = new Date().toISOString();
+  const candles = await fetchCandles(pair, timeframe, rangeStart, rangeEnd, 400).catch(() => []);
+  const btResult = runCandleBacktest(candles, timeframe, stoploss, roiTarget);
+
   backtests.unshift({
     id: crypto.randomUUID(),
     tenantId: req.principal!.tenantId,
     strategyId: id,
     timeframe,
     pairs,
-    rangeStart: daysAgo(5),
-    rangeEnd: new Date().toISOString(),
-    status: 'DONE',
-    metrics: {
-      profit_total_pct: 8.2,
-      trades: 34,
-      wins: 21,
-      win_rate: 0.618,
-      max_drawdown_pct: 5.3,
-      profit_factor: 1.48,
-      sharpe: 1.72,
-      timeframe,
-    },
-    trades: makeBacktestTrades(5),
-    error: null,
+    rangeStart,
+    rangeEnd,
+    status: btResult.status,
+    metrics: btResult.metrics,
+    trades: btResult.trades,
+    error: btResult.error,
     createdAt: new Date().toISOString(),
   });
+
+  bots.unshift({
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    userId: req.principal!.userId,
+    strategyId: id,
+    exchangeKeyId: null,
+    name: `${coin} INR Paper (${styleLabel})`,
+    mode: 'PAPER',
+    marketType: 'FUTURES',
+    pairs,
+    stakeCurrency: 'INR',
+    stakeAmount: 1000,
+    maxOpenTrades: 3,
+    leverage: 3,
+    status: 'RUNNING',
+    killSwitch: false,
+    marginCurrency: 'INR',
+    createdAt: new Date().toISOString(),
+  });
+
+  auditLogs.unshift({
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    entityType: 'STRATEGY',
+    entityId: id,
+    action: 'STRATEGY_GENERATED',
+    details: { reason: `Generated ${name} (${timeframe}) for ${pair}` },
+    createdAt: new Date().toISOString(),
+  });
+
   res.json(toStrategyView(strat, true));
+});
+
+function runCandleBacktest(
+  candles: CandleDto[],
+  timeframe: string,
+  stoploss: number,
+  roiTarget: number,
+) {
+  if (candles.length < 30) {
+    return {
+      status: 'FAILED' as Backtest['status'],
+      metrics: {
+        profit_total_pct: 0,
+        trades: 0,
+        wins: 0,
+        win_rate: 0,
+        max_drawdown_pct: 0,
+        profit_factor: 0,
+        sharpe: 0,
+        timeframe,
+      },
+      trades: [] as Array<{ entry_time: string; exit_time: string; profit_ratio: number }>,
+      error: 'Insufficient live CoinDCX historical candles for backtest',
+    };
+  }
+
+  const trades: Array<{ entry_time: string; exit_time: string; profit_ratio: number }> = [];
+  let emaFast = candles[0].close;
+  let emaSlow = candles[0].close;
+  const kFast = 2 / (12 + 1);
+  const kSlow = 2 / (26 + 1);
+
+  let inPos: { side: 'LONG' | 'SHORT'; entryPrice: number; entryTime: string; entryIdx: number } | null = null;
+
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i];
+    emaFast = c.close * kFast + emaFast * (1 - kFast);
+    emaSlow = c.close * kSlow + emaSlow * (1 - kSlow);
+
+    if (inPos) {
+      const sign = inPos.side === 'LONG' ? 1 : -1;
+      const movePct = inPos.entryPrice > 0 ? ((c.close - inPos.entryPrice) / inPos.entryPrice) * sign : 0;
+      const crossedBack =
+        (inPos.side === 'LONG' && emaFast < emaSlow) ||
+        (inPos.side === 'SHORT' && emaFast > emaSlow);
+      const hitSl = movePct <= stoploss;
+      const hitTp = movePct >= roiTarget;
+      const maxHold = i - inPos.entryIdx >= 48;
+      if (hitSl || hitTp || crossedBack || maxHold || i === candles.length - 1) {
+        const clampedRatio = hitSl ? stoploss : hitTp ? roiTarget : movePct;
+        trades.push({
+          entry_time: inPos.entryTime,
+          exit_time: c.ts,
+          profit_ratio: Number(clampedRatio.toFixed(4)),
+        });
+        inPos = null;
+      }
+      continue;
+    }
+
+    if (i >= 26 && i < candles.length - 2) {
+      if (emaFast > emaSlow && c.close > emaFast) {
+        inPos = { side: 'LONG', entryPrice: c.close, entryTime: c.ts, entryIdx: i };
+      } else if (emaFast < emaSlow && c.close < emaFast) {
+        inPos = { side: 'SHORT', entryPrice: c.close, entryTime: c.ts, entryIdx: i };
+      }
+    }
+  }
+
+  const totalTrades = trades.length;
+  const wins = trades.filter((t) => t.profit_ratio > 0).length;
+  const winRate = totalTrades === 0 ? 0 : Number((wins / totalTrades).toFixed(3));
+  const profitTotal = Number(trades.reduce((acc, t) => acc + t.profit_ratio * 100, 0).toFixed(2));
+
+  let peak = 0;
+  let equity = 0;
+  let maxDd = 0;
+  let grossGain = 0;
+  let grossLoss = 0;
+  for (const t of trades) {
+    const pct = t.profit_ratio * 100;
+    equity += pct;
+    if (equity > peak) peak = equity;
+    const dd = peak - equity;
+    if (dd > maxDd) maxDd = dd;
+    if (t.profit_ratio > 0) grossGain += t.profit_ratio;
+    else grossLoss += Math.abs(t.profit_ratio);
+  }
+  const profitFactor =
+    grossLoss > 0 ? Number((grossGain / grossLoss).toFixed(2)) : grossGain > 0 ? Number(grossGain.toFixed(2)) : 0;
+
+  const mean = totalTrades > 0 ? trades.reduce((a, b) => a + b.profit_ratio, 0) / totalTrades : 0;
+  const variance =
+    totalTrades > 1
+      ? trades.reduce((a, b) => a + (b.profit_ratio - mean) ** 2, 0) / (totalTrades - 1)
+      : 0;
+  const sharpe = variance > 0 ? Number(((mean / Math.sqrt(variance)) * Math.sqrt(totalTrades)).toFixed(2)) : 0;
+
+  return {
+    status: 'DONE' as Backtest['status'],
+    metrics: {
+      profit_total_pct: profitTotal,
+      trades: totalTrades,
+      wins,
+      win_rate: winRate,
+      max_drawdown_pct: Number(maxDd.toFixed(2)),
+      profit_factor: profitFactor,
+      sharpe,
+      timeframe,
+    },
+    trades,
+    error: null as string | null,
+  };
+}
+
+app.post('/api/v1/strategies/:id/backtest', requireAuth, async (req: AuthedRequest, res) => {
+  const s = strategies.find(
+    (x) => x.id === req.params.id && x.tenantId === req.principal!.tenantId,
+  );
+  if (!s) {
+    res.status(404).json({ message: 'Strategy not found' });
+    return;
+  }
+  const timeframe = String(req.body?.timeframe || s.config?.timeframe || '5m');
+  const days = Math.min(30, Math.max(2, Number(req.body?.days || 5)));
+  const rangeStart = daysAgo(days);
+  const rangeEnd = new Date().toISOString();
+  const pair = s.instrument || s.config?.pairs?.[0] || 'B-BTC_USDT';
+  const candles = await fetchCandles(pair, timeframe, rangeStart, rangeEnd, 600).catch(() => []);
+  const roiTarget = Number(s.config?.minimal_roi?.['0'] ?? 0.025);
+  const sl = Number(s.config?.stoploss ?? -0.014);
+  const btResult = runCandleBacktest(candles, timeframe, sl, roiTarget);
+
+  const bt: Backtest = {
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    strategyId: s.id,
+    timeframe,
+    pairs: [pair],
+    rangeStart,
+    rangeEnd,
+    status: btResult.status,
+    metrics: btResult.metrics,
+    trades: btResult.trades,
+    error: btResult.error,
+    createdAt: new Date().toISOString(),
+  };
+  backtests.unshift(bt);
+  if (s.status === 'GENERATED' && btResult.status === 'DONE') {
+    s.status = 'BACKTESTED';
+  }
+  auditLogs.unshift({
+    id: crypto.randomUUID(),
+    tenantId: req.principal!.tenantId,
+    entityType: 'BACKTEST',
+    entityId: s.id,
+    action: 'BACKTEST_COMPLETED',
+    details: {
+      reason:
+        btResult.status === 'DONE'
+          ? `${s.name} backtest (${timeframe}): ${btResult.metrics.profit_total_pct >= 0 ? '+' : ''}${btResult.metrics.profit_total_pct}% · ${(btResult.metrics.win_rate * 100).toFixed(1)}% WR (${btResult.metrics.trades} trades)`
+          : `${s.name} backtest failed: ${btResult.error}`,
+    },
+    createdAt: new Date().toISOString(),
+  });
+  res.json(bt);
 });
 
 app.get('/api/v1/backtests', requireAuth, (req: AuthedRequest, res) => {
@@ -1580,8 +2058,8 @@ app.post('/api/v1/keys', requireAuth, (req: AuthedRequest, res) => {
     userId: req.principal!.userId,
     exchange: 'COINDCX',
     label,
-    apiKeyEnc: hashPassword(apiKey),
-    apiSecretEnc: hashPassword(apiSecret),
+    apiKeyEnc: encryptSecret(apiKey),
+    apiSecretEnc: encryptSecret(apiSecret),
     keyLast4: apiKey.slice(-4),
     status: 'ACTIVE',
     createdAt: new Date().toISOString(),

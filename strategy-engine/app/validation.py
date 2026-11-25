@@ -66,14 +66,20 @@ def load_strategy_class(source: str):
             raise ImportError(f"Import of '{name}' is not allowed in strategies")
         return __import__(name, globals, locals, fromlist, level)
 
+    def safe_getattr(obj, name, *default):
+        if isinstance(name, str) and (name.startswith("__") or name in FORBIDDEN_ATTRS):
+            raise AttributeError(f"Access to '{name}' is forbidden in strategies")
+        return getattr(obj, name, *default)
+
     safe_builtins = {
         n: __builtins__[n] if isinstance(__builtins__, dict) else getattr(__builtins__, n)
         for n in ("abs", "min", "max", "sum", "len", "range", "enumerate", "zip", "map",
                   "filter", "sorted", "round", "float", "int", "str", "bool", "list",
-                  "dict", "set", "tuple", "isinstance", "getattr", "hasattr", "print",
+                  "dict", "set", "tuple", "isinstance", "hasattr", "print",
                   "ValueError", "TypeError", "Exception", "__build_class__", "__name__",
                   "staticmethod", "classmethod", "property", "super", "object")
     }
+    safe_builtins["getattr"] = safe_getattr
     safe_builtins["__import__"] = guarded_import
 
     namespace: dict = {
@@ -85,5 +91,8 @@ def load_strategy_class(source: str):
     exec(compile(source, "<strategy>", "exec"), namespace)  # noqa: S102 - gated by AST validation
     for value in namespace.values():
         if isinstance(value, type) and hasattr(value, "populate_indicators"):
+            stoploss = getattr(value, "stoploss", -0.02)
+            if not isinstance(stoploss, (int, float)) or float(stoploss) >= 0:
+                raise ValueError("Strategy stoploss must be negative (e.g. -0.015)")
             return value
     raise ValueError("No strategy class found after load")

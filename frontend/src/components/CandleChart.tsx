@@ -68,18 +68,18 @@ export function CandleChart({
       height,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#64748b',
-        fontFamily: 'Inter, sans-serif',
+        textColor: '#94a3b8',
+        fontFamily: 'JetBrains Mono, monospace',
       },
       grid: {
-        vertLines: { color: 'rgba(148,163,184,0.06)' },
-        horzLines: { color: 'rgba(148,163,184,0.06)' },
+        vertLines: { color: 'rgba(255,255,255,0.04)' },
+        horzLines: { color: 'rgba(255,255,255,0.04)' },
       },
-      rightPriceScale: { borderColor: 'rgba(148,163,184,0.15)' },
-      timeScale: { borderColor: 'rgba(148,163,184,0.15)', timeVisible: true },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true },
       crosshair: {
-        vertLine: { color: 'rgba(34,211,238,0.4)', labelBackgroundColor: '#0e7490' },
-        horzLine: { color: 'rgba(34,211,238,0.4)', labelBackgroundColor: '#0e7490' },
+        vertLine: { color: 'rgba(245,158,11,0.45)', labelBackgroundColor: '#b45309' },
+        horzLine: { color: 'rgba(245,158,11,0.45)', labelBackgroundColor: '#b45309' },
       },
     })
     chartRef.current = chart

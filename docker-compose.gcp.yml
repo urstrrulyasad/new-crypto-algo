@@ -38,6 +38,14 @@ services:
       SIGNAL_POLL_SECONDS: ${SIGNAL_POLL_SECONDS:-60}
     depends_on:
       - backend
-    # Keep engine private on the VM; only backend is public
+    # Keep engine private on the VM; only backend/frontend are public
     ports:
       - "127.0.0.1:8000:8000"
+
+  frontend:
+    image: ghcr.io/${GHCR_OWNER}/cryptoalgo-frontend:${FRONTEND_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"

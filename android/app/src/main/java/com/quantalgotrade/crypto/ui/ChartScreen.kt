@@ -2,6 +2,7 @@ package com.quantalgotrade.crypto.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,8 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -35,12 +35,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.quantalgotrade.crypto.data.AppContainer
 import com.quantalgotrade.crypto.data.Candle
 import com.quantalgotrade.crypto.data.Position
 import com.quantalgotrade.crypto.data.PriceLine
+import com.quantalgotrade.crypto.ui.theme.QuantColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.time.Instant
@@ -68,7 +70,6 @@ fun ChartScreen(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var lastClose by remember { mutableStateOf<Double?>(null) }
-    val scheme = MaterialTheme.colorScheme
 
     LaunchedEffect(pair, timeframe, mode, strategyId, positionId) {
         loading = candles.isEmpty()
@@ -114,7 +115,7 @@ fun ChartScreen(
                             } else {
                                 "Entry"
                             }
-                            overlay += PriceLine(pos.entryPrice, entryLabel, 0xFF22D3EE)
+                            overlay += PriceLine(pos.entryPrice, entryLabel, 0xFFF59E0B)
                             pos.markPrice?.takeIf { it > 0 }?.let {
                                 overlay += PriceLine(it, "Mark", 0xFF94A3B8)
                             }
@@ -122,10 +123,10 @@ fun ChartScreen(
                                 overlay += PriceLine(it, "Exit", 0xFFA78BFA)
                             }
                             pos.slPrice?.takeIf { it > 0 }?.let {
-                                overlay += PriceLine(it, "SL", 0xFFFB7185)
+                                overlay += PriceLine(it, "SL", 0xFFF43F5E)
                             }
                             pos.targetPrice?.takeIf { it > 0 }?.let {
-                                overlay += PriceLine(it, "TP", 0xFF34D399)
+                                overlay += PriceLine(it, "TP", 0xFF10B981)
                             }
                         }
                     }
@@ -137,9 +138,9 @@ fun ChartScreen(
                             val open = trades.firstOrNull { it.status == "OPEN" }
                             val closed = trades.firstOrNull { it.status == "CLOSED" && it.exitPrice != null }
                             when {
-                                open != null -> overlay += PriceLine(open.entryPrice, "Entry", 0xFF22D3EE)
+                                open != null -> overlay += PriceLine(open.entryPrice, "Entry", 0xFFF59E0B)
                                 closed != null -> {
-                                    overlay += PriceLine(closed.entryPrice, "Entry", 0xFF22D3EE)
+                                    overlay += PriceLine(closed.entryPrice, "Entry", 0xFFF59E0B)
                                     closed.exitPrice?.let { overlay += PriceLine(it, "Exit", 0xFFA78BFA) }
                                 }
                             }
@@ -168,23 +169,38 @@ fun ChartScreen(
     }
 
     val activePnl = activePos?.pnl ?: activePos?.unrealizedPnl
+    val modeAccent = when (mode.lowercase(Locale.US)) {
+        "live" -> QuantColors.Emerald
+        "paper" -> QuantColors.Amber
+        else -> QuantColors.Cyan
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(scheme.background),
+            .background(QuantColors.Canvas),
     ) {
         TopAppBar(
             title = {
-                Column {
-                    Text(pair, maxLines = 1, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        mode.uppercase(Locale.US) + (lastClose?.let {
-                            " · ${fmtChartPrice(it)}"
-                        } ?: ""),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = scheme.onSurfaceVariant,
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Column(Modifier.weight(1f, fill = false)) {
+                        Text(
+                            pair.removePrefix("B-").replace('_', '/'),
+                            maxLines = 1,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantColors.TextPrimary,
+                        )
+                        Text(
+                            lastClose?.let { fmtChartPrice(it) } ?: pair,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = QuantColors.TextMuted,
+                        )
+                    }
+                    StatusTag(text = mode.uppercase(Locale.US), accent = modeAccent)
                 }
             },
             navigationIcon = {
@@ -193,44 +209,34 @@ fun ChartScreen(
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = scheme.surface,
-                titleContentColor = scheme.onSurface,
-                navigationIconContentColor = scheme.onSurface,
+                containerColor = QuantColors.Surface,
+                titleContentColor = QuantColors.TextPrimary,
+                navigationIconContentColor = QuantColors.TextPrimary,
             ),
         )
+        HorizontalDivider(thickness = 1.dp, color = QuantColors.Hairline)
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TIMEFRAMES.forEach { tf ->
-                FilterChip(
-                    selected = timeframe == tf,
-                    onClick = { timeframe = tf },
-                    label = { Text(tf) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = scheme.primary.copy(alpha = 0.2f),
-                        selectedLabelColor = scheme.primary,
-                    ),
-                )
-            }
-        }
+        SegmentedTabBar(
+            options = TIMEFRAMES,
+            selectedIndex = TIMEFRAMES.indexOf(timeframe).coerceAtLeast(0),
+            onSelect = { idx -> timeframe = TIMEFRAMES[idx] },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+        )
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .padding(horizontal = 12.dp, vertical = 4.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(scheme.surface),
+                .clip(RoundedCornerShape(16.dp))
+                .background(QuantColors.Surface)
+                .border(1.dp, QuantColors.Hairline, RoundedCornerShape(16.dp)),
             contentAlignment = Alignment.Center,
         ) {
             when {
-                loading -> CircularProgressIndicator(color = scheme.primary)
-                error != null && candles.isEmpty() -> Text(error!!, color = scheme.error, modifier = Modifier.padding(16.dp))
-                candles.isEmpty() -> Text("No candle data", color = scheme.onSurfaceVariant)
+                loading -> CircularProgressIndicator(color = QuantColors.Cyan)
+                error != null && candles.isEmpty() -> Text(error!!, color = QuantColors.Rose, modifier = Modifier.padding(16.dp))
+                candles.isEmpty() -> Text("No candle data", color = QuantColors.TextMuted)
                 else -> NativeCandleChart(
                     candles = candles,
                     priceLines = lines,
@@ -242,54 +248,55 @@ fun ChartScreen(
         }
 
         if (activePos != null && (mode == "live" || mode == "paper")) {
-            Column(
+            DeskCard(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(scheme.surface)
-                    .padding(14.dp)
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                val sideShort = if (activePos!!.side.equals("SHORT", true) || activePos!!.side == "S") "S" else "L"
-                val name = activePos!!.pair.removePrefix("B-").replace('_', '-')
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(
-                        "$name $sideShort${activePos!!.leverage?.let { " · ${it.toInt()}x" } ?: ""}",
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "${fmtChartInr(activePnl)}${activePos!!.roePct?.let { " (${String.format(Locale.US, "%+.2f%%", it)})" } ?: ""}",
-                        color = if ((activePnl ?: 0.0) >= 0) scheme.secondary else scheme.error,
-                        fontWeight = FontWeight.Bold,
+                val sideShort = if (activePos!!.side.equals("SHORT", true) || activePos!!.side == "S") "SHORT" else "LONG"
+                val name = activePos!!.pair.removePrefix("B-").replace('_', '/')
+                val pnlPositive = (activePnl ?: 0.0) >= 0
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text(
+                            "$name · $sideShort${activePos!!.leverage?.let { " ${it.toInt()}x" } ?: ""}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = QuantColors.TextPrimary,
+                        )
+                        Text(
+                            "Active position telemetry",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = QuantColors.TextMuted,
+                        )
+                    }
+                    StatusTag(
+                        text = "${fmtChartInr(activePnl)}${activePos!!.roePct?.let { " (${String.format(Locale.US, "%+.2f%%", it)})" } ?: ""}",
+                        accent = if (pnlPositive) QuantColors.Emerald else QuantColors.Rose,
                     )
                 }
-                Text("Active PnL", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
-                Spacer(Modifier.height(2.dp))
-                PosRow("Margin", fmtChartInr(activePos!!.marginInr, signed = false))
-                PosRow("Size", fmtChartInr(activePos!!.sizeInr, signed = false))
-                PosRow("Avg. entry", fmtChartPrice(activePos!!.entryPrice))
-                PosRow("Mark", fmtChartPrice(activePos!!.markPrice))
-                PosRow("SL", fmtChartPrice(activePos!!.slPrice))
-                PosRow("TP", fmtChartPrice(activePos!!.targetPrice))
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(thickness = 1.dp, color = QuantColors.Hairline)
+                Spacer(Modifier.height(6.dp))
+                StatRow("Margin", fmtChartInr(activePos!!.marginInr, signed = false))
+                StatRow("Size", fmtChartInr(activePos!!.sizeInr, signed = false))
+                StatRow("Avg. entry", fmtChartPrice(activePos!!.entryPrice))
+                StatRow("Mark", fmtChartPrice(activePos!!.markPrice))
+                StatRow("Stop loss", fmtChartPrice(activePos!!.slPrice), QuantColors.Rose)
+                StatRow("Take profit", fmtChartPrice(activePos!!.targetPrice), QuantColors.Emerald)
             }
         } else {
             Text(
                 "Pinch to zoom · drag to pan",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                 style = MaterialTheme.typography.labelMedium,
-                color = scheme.onSurfaceVariant,
+                color = QuantColors.TextMuted,
             )
         }
-    }
-}
-
-@Composable
-private fun PosRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-        Text(value, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodySmall)
     }
 }
 

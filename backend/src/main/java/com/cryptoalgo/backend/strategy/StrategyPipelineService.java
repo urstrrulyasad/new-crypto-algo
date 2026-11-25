@@ -40,7 +40,8 @@ public class StrategyPipelineService {
     public static final List<String> STRATEGY_STYLES = List.of(
             "mean-reversion",
             "trend-following",
-            "breakout-momentum"
+            "breakout-momentum",
+            "keltner-squeeze"
     );
 
     private final AiChainService aiChain;
@@ -204,20 +205,24 @@ public class StrategyPipelineService {
     private static String buildGoal(String instrument, String style, MarketNewsService.NewsBrief brief) {
         String styleGuide = switch (style) {
             case "trend-following" ->
-                    "Primary style: TREND-FOLLOWING. Famous bases: EMA/SMA pullback, dual-MA crossover. "
+                    "Primary style: TREND-FOLLOWING. Famous bases: EMA/SMA pullback, dual-MA crossover with ADX >= 20 regime gate and ATR volatility bounds. "
                             + "Invent NEW windows/filters each time. Exits on trend break / trailing ROI.";
             case "breakout-momentum" ->
-                    "Primary style: BREAKOUT/MOMENTUM. Famous bases: Donchian/Turtle breakout, MACD hist flip. "
+                    "Primary style: BREAKOUT/MOMENTUM. Famous bases: Donchian/Turtle breakout, MACD hist flip with >1.2x volume surge confirmation. "
                             + "Invent NEW lookbacks/volume filters. Tight invalidation if breakout fails.";
+            case "keltner-squeeze" ->
+                    "Primary style: VOLATILITY SQUEEZE BREAKOUT. Famous bases: Bollinger inside Keltner release + ADX >= 18 + volume spike. "
+                            + "Invent NEW BB/KC ratios and hold momentum.";
             default ->
-                    "Primary style: MEAN-REVERSION. Famous bases: RSI+Bollinger fade, RSI-2 style extremes. "
-                            + "Invent NEW RSI/BB periods each time; fade extremes, do not chase trends.";
+                    "Primary style: MEAN-REVERSION. Famous bases: VWAP z-score + StochRSI/Bollinger fade strictly gated by ranging ADX < 26. "
+                            + "Invent NEW RSI/BB/VWAP periods each time; fade extremes, do not chase trends.";
         };
         return "INR-margined CoinDCX futures strategy for " + instrument + ".\n"
                 + styleGuide + "\n"
                 + "Create a DISTINCT new strategy (unique params), not a copy of a prior run. "
-                + "Long and short with strict risk. Target profit_factor > 1.2, win_rate > 55%, "
-                + "positive total profit, max drawdown under 35%. Avoid overtrading. Timeframe 5m.\n\n"
+                + "Enforce reward:risk >= 1.6:1 (e.g. stoploss -0.015, ROI >= 0.025). "
+                + "Target profit_factor > 1.3, win_rate > 55%, positive total profit, max drawdown under 30%. "
+                + "Avoid overtrading. Timeframe 5m.\n\n"
                 + brief.promptBlock();
     }
 
@@ -227,6 +232,7 @@ public class StrategyPipelineService {
         for (String known : STRATEGY_STYLES) {
             if (known.equals(s) || s.contains(known.split("-")[0])) return known;
         }
+        if (s.contains("squeeze")) return "keltner-squeeze";
         return STRATEGY_STYLES.get(0);
     }
 
@@ -247,13 +253,14 @@ public class StrategyPipelineService {
         return switch (normalizeStyle(style)) {
             case "trend-following" -> "Trend";
             case "breakout-momentum" -> "Breakout";
+            case "keltner-squeeze" -> "Squeeze";
             default -> "MR";
         };
     }
 
     private static String riskForStyle(String style) {
         return switch (normalizeStyle(style)) {
-            case "breakout-momentum" -> "aggressive";
+            case "breakout-momentum", "keltner-squeeze" -> "aggressive";
             case "trend-following" -> "balanced";
             default -> "conservative";
         };

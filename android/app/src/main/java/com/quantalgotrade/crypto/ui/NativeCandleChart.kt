@@ -32,9 +32,9 @@ fun NativeCandleChart(
     var scaleX by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
 
-    val up = Color(0xFF34D399)
-    val down = Color(0xFFFB7185)
-    val grid = Color(0xFF1A2336)
+    val up = Color(0xFF10B981)
+    val down = Color(0xFFF43F5E)
+    val grid = Color(0xFF262A3B)
     val label = Color(0xFF94A3B8)
 
     Canvas(

@@ -27,6 +27,12 @@ interface ApiService {
     @GET("/api/v1/portfolio/orders")
     suspend fun orders(@Query("mode") mode: String = "LIVE"): List<TradeOrder>
 
+    @POST("/api/v1/paper/orders")
+    suspend fun placePaperOrder(@Body body: PaperOrderRequest): Position
+
+    @POST("/api/v1/paper/positions/{id}/close")
+    suspend fun closePaperPosition(@Path("id") id: String): Position
+
     @GET("/api/v1/strategies")
     suspend fun strategies(@Query("marketType") marketType: String = "FUTURES"): List<Strategy>
 

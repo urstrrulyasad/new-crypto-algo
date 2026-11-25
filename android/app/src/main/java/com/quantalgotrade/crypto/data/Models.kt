@@ -44,11 +44,20 @@ data class Wallet(
 @Serializable
 data class Summary(
     val mode: String? = null,
+    val hasApiKey: Boolean? = null,
     val openPositions: Int = 0,
     val closedPositions: Int = 0,
     val realizedPnl: Double = 0.0,
     val unrealizedPnl: Double = 0.0,
     val winRate: Double = 0.0,
+)
+
+@Serializable
+data class PaperOrderRequest(
+    val pair: String,
+    val side: String,
+    val quantity: Double,
+    val leverage: Int = 3,
 )
 
 @Serializable

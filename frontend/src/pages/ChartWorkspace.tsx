@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { motion } from 'motion/react'
 import { api } from '@/lib/api'
-import { Badge, Button, Card, Empty, PageTitle, Spinner } from '@/components/ui'
+import { useToast } from '@/lib/toast'
+import { Badge, Button, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
 import {
   CandleChart,
   type Candle,
@@ -70,7 +72,7 @@ function fmtInr(v?: number | null, signed = true) {
   })
   if (!signed) return `₹${abs}`
   if (n > 0) return `+₹${abs}`
-  if (n < 0) return `-₹${abs}`
+  if (n < 0) return `−₹${abs}`
   return `₹${abs}`
 }
 
@@ -85,7 +87,7 @@ function fmtPrice(v?: number | null) {
 
 function entryLineLabel(pos: PortfolioPosition, modeTag: string) {
   const pnl = pos.pnl ?? pos.unrealizedPnl
-  const qty = pos.quantity != null ? Number(pos.quantity).toFixed(0) : ''
+  const qty = pos.quantity != null ? Number(pos.quantity).toFixed(2) : ''
   if (pnl != null && Number.isFinite(Number(pnl))) {
     const sign = Number(pnl) >= 0 ? '+' : ''
     return `${qty ? `${qty} ` : ''}${sign}${Number(pnl).toFixed(2)} INR`
@@ -97,6 +99,7 @@ export default function ChartWorkspace() {
   const { pair: pairParam } = useParams()
   const [search, setSearch] = useSearchParams()
   const navigate = useNavigate()
+  const { pushToast } = useToast()
 
   const pair = decodeURIComponent(pairParam ?? '')
   const mode = (search.get('mode') as Mode) || 'clean'
@@ -110,23 +113,23 @@ export default function ChartWorkspace() {
   const [activePos, setActivePos] = useState<PortfolioPosition | null>(null)
   const [banner, setBanner] = useState('')
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loadedKey, setLoadedKey] = useState('')
   const [modeBadge, setModeBadge] = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
   const failCount = useRef(0)
   const backoffMs = useRef(10_000)
+  const currentKey = `${pair}|${timeframe}|${mode}`
+  const loading = loadedKey !== currentKey && candles.length === 0
 
-  // Invalid strategy mode → clean + toast
   useEffect(() => {
-    if (mode !== 'strategy') return
-    if (isUuid(strategyId)) return
-    setBanner('Pick a strategy — opened clean chart.')
+    if (mode !== 'strategy' || isUuid(strategyId)) return
+    pushToast({ title: 'Opened clean chart', detail: 'Select a strategy to view trade overlays.', tone: 'info' })
     const next = new URLSearchParams(search)
     next.set('mode', 'clean')
     next.delete('strategyId')
     navigate(`/futures/chart/${encodeURIComponent(pair)}?${next.toString()}`, { replace: true })
-  }, [mode, strategyId, pair, navigate, search])
+  }, [mode, strategyId, pair, navigate, search, pushToast])
 
   const setTf = (tf: string) => {
     const next = new URLSearchParams(search)
@@ -148,21 +151,21 @@ export default function ChartWorkspace() {
       if (ac.signal.aborted) return
       setCandles(data ?? [])
       setError(data?.length ? '' : 'No candle data')
+      setLoadedKey(currentKey)
       failCount.current = 0
-      backoffMs.current = mode === 'live' || mode === 'paper' ? 2_000 : 10_000
+      backoffMs.current = mode === 'live' || mode === 'paper' ? 3_000 : 10_000
     } catch (e) {
       if (ac.signal.aborted) return
       failCount.current += 1
       backoffMs.current = Math.min(60_000, 10_000 * 2 ** Math.min(failCount.current - 1, 2))
-      if (failCount.current >= 5) setError('Market data unavailable')
-      else setError(e instanceof Error ? e.message : 'Candle fetch failed')
-    } finally {
-      if (!ac.signal.aborted) setLoading(false)
+      setError(failCount.current >= 5 ? 'Market data unavailable' : e instanceof Error ? e.message : 'Candle fetch failed')
+      setLoadedKey(currentKey)
     }
-  }, [pair, timeframe, mode])
+  }, [pair, timeframe, mode, currentKey])
 
   const loadOverlays = useCallback(async () => {
     if (mode === 'clean' || !pair) {
+      await Promise.resolve()
       setMarkers([])
       setPriceLines([])
       setActivePos(null)
@@ -172,16 +175,13 @@ export default function ChartWorkspace() {
 
     if (mode === 'strategy' && isUuid(strategyId)) {
       try {
-        const trades = await api.get<StrategyTrade[]>(
-          `/api/v1/strategies/${strategyId}/trades`,
-        )
+        const trades = await api.get<StrategyTrade[]>(`/api/v1/strategies/${strategyId}/trades`)
         const forPair = (trades ?? []).filter((t) => t.pair === pair)
         const sorted = [...forPair].sort(
           (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime(),
         )
-        const top = sorted.slice(0, 50)
         const m: TradeMarker[] = []
-        for (const t of top) {
+        for (const t of sorted.slice(0, 50)) {
           if (t.openedAt) m.push({ time: t.openedAt, type: 'entry' })
           if (t.status === 'CLOSED' && t.closedAt) m.push({ time: t.closedAt, type: 'exit' })
         }
@@ -215,32 +215,17 @@ export default function ChartWorkspace() {
           lines.push({
             price: Number(found.pos.entryPrice),
             label: entryLineLabel(found.pos, found.preferMode),
-            color: '#22d3ee',
+            color: '#f59e0b',
             style: 'solid',
           })
           if (found.pos.markPrice != null && Number(found.pos.markPrice) > 0) {
-            lines.push({
-              price: Number(found.pos.markPrice),
-              label: 'Mark',
-              color: '#94a3b8',
-              style: 'dashed',
-            })
+            lines.push({ price: Number(found.pos.markPrice), label: 'Mark', color: '#94a3b8', style: 'dashed' })
           }
           if (found.pos.slPrice != null && Number(found.pos.slPrice) > 0) {
-            lines.push({
-              price: Number(found.pos.slPrice),
-              label: 'SL',
-              color: '#fb7185',
-              style: 'dashed',
-            })
+            lines.push({ price: Number(found.pos.slPrice), label: 'SL', color: '#f43f5e', style: 'dashed' })
           }
           if (found.pos.targetPrice != null && Number(found.pos.targetPrice) > 0) {
-            lines.push({
-              price: Number(found.pos.targetPrice),
-              label: 'TP',
-              color: '#34d399',
-              style: 'dashed',
-            })
+            lines.push({ price: Number(found.pos.targetPrice), label: 'TP', color: '#10b981', style: 'dashed' })
           }
         } else if (openTrade) {
           setActivePos(null)
@@ -248,7 +233,7 @@ export default function ChartWorkspace() {
           lines.push({
             price: Number(openTrade.entryPrice),
             label: `Entry ${openTrade.mode}`,
-            color: '#22d3ee',
+            color: '#f59e0b',
             style: 'solid',
           })
         } else {
@@ -297,36 +282,21 @@ export default function ChartWorkspace() {
           {
             price: Number(pos.entryPrice),
             label: entryLineLabel(pos, portfolioMode),
-            color: '#22d3ee',
+            color: '#f59e0b',
             style: 'solid',
           },
         ]
         if (pos.markPrice != null && Number(pos.markPrice) > 0) {
-          lines.push({
-            price: Number(pos.markPrice),
-            label: 'Mark',
-            color: '#94a3b8',
-            style: 'dashed',
-          })
+          lines.push({ price: Number(pos.markPrice), label: 'Mark', color: '#94a3b8', style: 'dashed' })
         }
         if (pos.exitPrice != null && Number(pos.exitPrice) > 0) {
-          lines.push({
-            price: Number(pos.exitPrice),
-            label: `Exit ${portfolioMode}`,
-            color: '#a78bfa',
-            style: 'dashed',
-          })
+          lines.push({ price: Number(pos.exitPrice), label: `Exit ${portfolioMode}`, color: '#a78bfa', style: 'dashed' })
         }
         if (pos.slPrice != null && Number(pos.slPrice) > 0) {
-          lines.push({ price: Number(pos.slPrice), label: 'SL', color: '#fb7185', style: 'dashed' })
+          lines.push({ price: Number(pos.slPrice), label: 'SL', color: '#f43f5e', style: 'dashed' })
         }
         if (pos.targetPrice != null && Number(pos.targetPrice) > 0) {
-          lines.push({
-            price: Number(pos.targetPrice),
-            label: 'TP',
-            color: '#34d399',
-            style: 'dashed',
-          })
+          lines.push({ price: Number(pos.targetPrice), label: 'TP', color: '#10b981', style: 'dashed' })
         }
         setPriceLines(lines)
       } catch {
@@ -338,9 +308,11 @@ export default function ChartWorkspace() {
   }, [mode, pair, strategyId, positionId])
 
   useEffect(() => {
-    setLoading(true)
-    void loadCandles()
-    void loadOverlays()
+    const id = setTimeout(() => {
+      void loadCandles()
+      void loadOverlays()
+    }, 0)
+    return () => clearTimeout(id)
   }, [loadCandles, loadOverlays])
 
   useEffect(() => {
@@ -352,14 +324,15 @@ export default function ChartWorkspace() {
       }
       void loadCandles()
       void loadOverlays()
-      const ms = mode === 'live' || mode === 'paper' ? 2_000 : backoffMs.current
+      const ms = mode === 'live' || mode === 'paper' ? 3_000 : backoffMs.current
       timer = setTimeout(tick, ms)
     }
-    timer = setTimeout(tick, mode === 'live' || mode === 'paper' ? 2_000 : backoffMs.current)
+    timer = setTimeout(tick, mode === 'live' || mode === 'paper' ? 3_000 : backoffMs.current)
     return () => clearTimeout(timer)
   }, [loadCandles, loadOverlays, mode])
 
   const title = useMemo(() => pair || 'Chart', [pair])
+  const lastCandle = candles[candles.length - 1]
   const activePnl = activePos?.pnl ?? activePos?.unrealizedPnl ?? null
   const showPosPanel =
     activePos != null &&
@@ -367,20 +340,29 @@ export default function ChartWorkspace() {
 
   if (!pair) {
     return (
-      <div>
+      <PageShell>
         <PageTitle title="Chart" subtitle="Missing pair" />
         <Empty message="No pair in URL." />
-      </div>
+      </PageShell>
     )
   }
 
   return (
-    <div>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <PageTitle
-          title={title}
-          subtitle={`${mode} · FUTURES INR${modeBadge ? ` · ${modeBadge}` : ''}`}
-        />
+    <PageShell>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="font-[family-name:var(--font-display)] text-2xl font-bold tracking-tight text-slate-100 sm:text-3xl">
+            {title}
+            {lastCandle && (
+              <span className="ml-3 font-mono-num text-xl font-semibold text-amber-300">
+                {fmtPrice(lastCandle.close)}
+              </span>
+            )}
+          </h1>
+          <p className="mt-1 font-mono-num text-xs uppercase tracking-wider text-slate-400">
+            {mode} · FUTURES INR{modeBadge ? ` · ${modeBadge}` : ''}
+          </p>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Link to="/futures/coins">
             <Button variant="ghost">Coins</Button>
@@ -396,30 +378,39 @@ export default function ChartWorkspace() {
         </div>
       </div>
 
-      <Card>
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          {TIMEFRAMES.map((tf) => (
-            <button
-              key={tf}
-              type="button"
-              onClick={() => setTf(tf)}
-              className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
-                timeframe === tf
-                  ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200'
-                  : 'border-edge text-slate-400 hover:border-cyan-500/40 hover:text-cyan-300'
-              }`}
-            >
-              {tf}
-            </button>
-          ))}
-          <Badge tone="info">{mode}</Badge>
-          {modeBadge && <Badge tone={modeBadge === 'LIVE' ? 'success' : 'warn'}>{modeBadge}</Badge>}
+      <Card hover={false}>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="inline-flex gap-1 rounded-xl border border-edge bg-surface/80 p-1">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                onClick={() => setTf(tf)}
+                className={`relative cursor-pointer rounded-lg px-3 py-1 font-mono-num text-xs font-medium transition-colors ${
+                  timeframe === tf ? 'text-amber-200' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {timeframe === tf && (
+                  <motion.span
+                    layoutId="chart-tf-pill"
+                    className="absolute inset-0 rounded-lg border border-amber-500/35 bg-amber-500/15"
+                    transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                  />
+                )}
+                <span className="relative z-10">{tf}</span>
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge tone="info">{mode}</Badge>
+            {modeBadge && <Badge tone={modeBadge === 'LIVE' ? 'success' : 'warn'}>{modeBadge}</Badge>}
+          </div>
         </div>
 
         {banner && <p className="mb-3 text-sm text-amber-300">{banner}</p>}
         {error && <p className="mb-3 text-sm text-rose-400">{error}</p>}
 
-        {loading && candles.length === 0 ? (
+        {loading ? (
           <Spinner />
         ) : candles.length === 0 ? (
           <Empty message="No candle data" />
@@ -429,19 +420,21 @@ export default function ChartWorkspace() {
       </Card>
 
       {showPosPanel && (
-        <Card className="mt-4">
+        <Card className="mt-4" hover={false}>
           <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
             <div>
               <p className="text-sm font-semibold text-slate-100">
-                Active position · {activePos.pair.replace(/^B-/, '').replace('_', '-')}{' '}
-                {activePos.side === 'SHORT' || activePos.side === 'S' ? 'S' : 'L'}
+                Active Position · {activePos.pair.replace(/^B-/, '').replace('_', '-')}{' '}
+                <span className={activePos.side === 'SHORT' ? 'text-rose-400' : 'text-emerald-400'}>
+                  {activePos.side}
+                </span>
                 {activePos.leverage != null ? ` · ${activePos.leverage}x` : ''}
               </p>
-              <p className="text-xs text-slate-500">{activePos.status}</p>
+              <p className="font-mono-num text-xs text-slate-500">{activePos.status}</p>
             </div>
             <div className="text-right">
               <p
-                className={`text-lg font-semibold ${
+                className={`font-mono-num text-lg font-semibold ${
                   Number(activePnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               >
@@ -472,15 +465,15 @@ export default function ChartWorkspace() {
           </div>
         </Card>
       )}
-    </div>
+    </PageShell>
   )
 }
 
 function PosStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-edge/60 bg-slate-950/40 px-3 py-2">
-      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-0.5 text-sm font-medium text-slate-200">{value}</p>
+    <div className="rounded-xl border border-edge bg-surface/65 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wider text-slate-500">{label}</p>
+      <p className="mt-0.5 font-mono-num text-sm font-medium text-slate-100">{value}</p>
     </div>
   )
 }

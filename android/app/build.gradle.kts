@@ -13,14 +13,37 @@ android {
         applicationId = "com.quantalgotrade.crypto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.5.2"
-        buildConfigField("String", "DEFAULT_API_BASE", "\"https://hbpt7cur19.execute-api.ap-south-1.amazonaws.com\"")
+        val appVersionCode = (project.findProperty("VERSION_CODE") as String?)?.toIntOrNull() ?: 10
+        versionCode = appVersionCode
+        versionName = "2.0.0"
+        val apiBaseUrl = (project.findProperty("API_BASE_URL") as String?)
+            ?: System.getenv("API_BASE_URL")
+            ?: "https://ais-pre-r7dhdzdwvjwd63vrk2iif7-69167419510.asia-east1.run.app"
+        buildConfigField("String", "DEFAULT_API_BASE", "\"${apiBaseUrl.trim().trimEnd('/')}\"")
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystorePath = System.getenv("KEYSTORE_PATH")
+            if (!keystorePath.isNullOrBlank() && file(keystorePath).exists()) {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("KEY_PASSWORD") ?: ""
+            } else {
+                val debugCfg = getByName("debug")
+                storeFile = debugCfg.storeFile
+                storePassword = debugCfg.storePassword
+                keyAlias = debugCfg.keyAlias
+                keyPassword = debugCfg.keyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

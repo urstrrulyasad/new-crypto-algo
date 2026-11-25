@@ -87,7 +87,10 @@ class PaperCatchupRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "patterns": len(patterns_for_style("all")),
+    }
 
 
 @app.post("/generate")
@@ -283,21 +286,46 @@ async def backtest(req: BacktestRequest, x_internal_token: str | None = Header(N
         per_pair[pair] = result["metrics"]
         all_trades.extend(result["trades"])
 
-    total_trades = sum(m["trades"] for m in per_pair.values())
-    wins = sum(m["wins"] for m in per_pair.values())
+    ordered_trades = sorted(all_trades, key=lambda t: t["entry_time"])
+    total_trades = len(ordered_trades)
+    wins = sum(1 for t in ordered_trades if t["profit_ratio"] > 0)
+    gross_win = sum(t["profit_ratio"] for t in ordered_trades if t["profit_ratio"] > 0)
+    gross_loss = abs(sum(t["profit_ratio"] for t in ordered_trades if t["profit_ratio"] <= 0))
+    agg_pf = round(gross_win / gross_loss, 4) if gross_loss > 0 else None
+
+    eq = 1.0
+    peak = 1.0
+    agg_dd = 0.0
+    returns: list[float] = []
+    for t in ordered_trades:
+        r = float(t["profit_ratio"])
+        returns.append(r)
+        eq *= max(0.0, 1.0 + r)
+        peak = max(peak, eq)
+        if peak > 0:
+            agg_dd = max(agg_dd, (peak - eq) / peak)
+
+    agg_sharpe = None
+    if len(returns) > 1:
+        import math
+        mean = sum(returns) / len(returns)
+        var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        if var > 0:
+            agg_sharpe = round(mean / math.sqrt(var) * math.sqrt(len(returns)), 4)
+
     combined = {
         "pairs": per_pair,
         "trades": total_trades,
         "wins": wins,
         "win_rate": round(wins / total_trades, 4) if total_trades else 0,
-        "profit_total_pct": round(sum(m["profit_total_pct"] for m in per_pair.values()), 4),
-        "max_drawdown_pct": max((m["max_drawdown_pct"] for m in per_pair.values()), default=0),
-        "profit_factor": next((m.get("profit_factor") for m in per_pair.values() if m.get("profit_factor")), None),
-        "sharpe": next((m.get("sharpe") for m in per_pair.values() if m.get("sharpe")), None),
+        "profit_total_pct": round((eq - 1.0) * 100, 4) if total_trades else 0.0,
+        "max_drawdown_pct": round(agg_dd * 100, 4),
+        "profit_factor": agg_pf,
+        "sharpe": agg_sharpe,
         "timeframe": req.timeframe,
         "market_type": req.market_type,
     }
-    return {"metrics": combined, "trades": sorted(all_trades, key=lambda t: t["entry_time"])}
+    return {"metrics": combined, "trades": ordered_trades[-100:]}
 
 
 @app.post("/paper-catchup")

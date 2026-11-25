@@ -37,15 +37,14 @@ Generate a Python trading strategy class with EXACTLY this contract (freqtrade-s
   EMAIndicator exposes ema_indicator()). Never invent method names.
 - No I/O, no network, no file access, no exec/eval. Vectorized pandas only.
 - Design for leveraged INR futures on 5m (preferred) or 1m:
-  prioritize POSITIVE expectancy over raw signal count.
-  Require selective entries (filters + confirmation), not constant flipping.
-  Prefer RSI mean-reversion with BB/EMA confirmation, or EMA trend with
-  pullback entries. Keep stoploss tight (≤5%). Set minimal_roi["0"] to at least
-  1.5× the stoploss magnitude so the first target clears round-trip taker fees
-  (~0.15%) with positive expectancy (e.g. stoploss -0.014 with minimal_roi
-  {"0": 0.022}); never let the target sit below the stop. Target win_rate ≥55%
-  and profit_factor > 1. Always set both long and short entry rules when can_short
-  is true. Avoid strategies that overtrade every candle.
+  prioritize POSITIVE expectancy and drawdown control over raw signal count.
+  Always pair primary signal triggers with (1) trend/regime gating (e.g. ADX > 18 or EMA slope),
+  (2) volatility/ATR sanity checks to skip dead chop, and (3) volume confirmation (volume > rolling mean * 0.8).
+  Keep stoploss tight (≤5%). Set minimal_roi["0"] to at least 1.6× the stoploss magnitude
+  so the first target clears round-trip taker fees (~0.15%) with positive expectancy
+  (e.g. stoploss -0.013 with minimal_roi {"0": 0.022}); never let the target sit below the stop.
+  Target win_rate ≥58%, profit_factor ≥1.4, and clean populate_exit_trend exhaustion signals.
+  Always set both long and short entry rules when can_short is true. Avoid strategies that overtrade every candle.
 
 
 Respond with ONLY a JSON object: {"source_code": "<python code>", "config": {"timeframe": "...", "stoploss": ..., "minimal_roi": {...}, "can_short": true}, "explanation": "<one paragraph>"}"""

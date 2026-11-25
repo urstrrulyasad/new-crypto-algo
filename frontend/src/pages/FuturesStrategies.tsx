@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { motion } from 'motion/react'
+import { AnimatePresence, motion } from 'motion/react'
 import { api } from '@/lib/api'
 import { formatDateTime } from '@/lib/datetime'
+import { useToast } from '@/lib/toast'
+import { EquityCurve } from '@/components/EquityCurve'
+import { IconCheck, IconChevronRight, IconCopy, IconPlay, IconSpark } from '@/components/Icons'
 import { OrderCard, PositionCard } from '@/components/TradeLedger'
-import { Badge, Button, Callout, Card, Empty, PageShell, PageTitle, Spinner } from '@/components/ui'
+import { Badge, Button, Callout, Card, Empty, Input, Label, PageShell, PageTitle, Spinner } from '@/components/ui'
 import { CandleChart, type Candle, type TradeMarker } from '@/components/CandleChart'
 
 interface PaperProgress {
@@ -31,6 +34,9 @@ interface Strategy {
     pairs?: string[]
     provider_used?: string
     model_used?: string
+    style?: string
+    stoploss?: number
+    minimal_roi?: Record<string, number>
     generation_errors?: string[] | string
   }
   createdAt: string
@@ -59,6 +65,25 @@ const STATUS_TONE: Record<string, 'success' | 'info' | 'warn' | 'danger' | 'defa
   ARCHIVED: 'default',
 }
 
+const POPULAR_PAIRS = [
+  'B-BTC_USDT',
+  'B-ETH_USDT',
+  'B-SOL_USDT',
+  'B-XRP_USDT',
+  'B-BNB_USDT',
+  'B-SUI_USDT',
+  'B-DOGE_USDT',
+  'B-ADA_USDT',
+]
+
+const STYLE_LABELS: Record<string, string> = {
+  'trend-following': 'ATR-Regime EMA Momentum',
+  'keltner-squeeze': 'Keltner Squeeze Breakout',
+  'breakout-squeeze': 'Keltner Squeeze Breakout',
+  'mean-reversion': 'StochRSI-VWAP MeanRev',
+  'donchian-adx': 'Donchian-ADX Breakout',
+}
+
 function coinKey(s: Strategy): string {
   return s.instrument || s.config?.pairs?.[0] || 'UNKNOWN'
 }
@@ -72,6 +97,7 @@ interface CoinBucket {
   strategies: Strategy[]
   bestStatus: string
   openPositions: number
+  bestWinRate: number
 }
 
 function groupByCoin(list: Strategy[]): CoinBucket[] {
@@ -90,22 +116,33 @@ function groupByCoin(list: Strategy[]): CoinBucket[] {
     .map(([instrument, strategies]) => {
       const sorted = [...strategies].sort((a, b) => rank(a.status) - rank(b.status))
       const openPositions = strategies.reduce((n, s) => n + (s.paper?.openPositions ?? 0), 0)
+      const bestWinRate = Math.max(0, ...strategies.map((s) => s.paper?.winRate ?? 0))
       return {
         instrument,
         strategies: sorted,
         bestStatus: sorted[0]?.status ?? 'GENERATED',
         openPositions,
+        bestWinRate,
       }
     })
     .sort((a, b) => shortCoin(a.instrument).localeCompare(shortCoin(b.instrument)))
 }
 
 export default function FuturesStrategies() {
+  const { pushToast } = useToast()
   const [strategies, setStrategies] = useState<Strategy[] | null>(null)
   const [selectedCoin, setSelectedCoin] = useState<string | null>(null)
   const [selected, setSelected] = useState<Strategy | null>(null)
 
-  const load = () =>
+  const [genOpen, setGenOpen] = useState(false)
+  const [genPair, setGenPair] = useState('B-BTC_USDT')
+  const [genStyle, setGenStyle] = useState('trend-following')
+  const [genTf, setGenTf] = useState('5m')
+  const [genRisk, setGenRisk] = useState('balanced')
+  const [genName, setGenName] = useState('')
+  const [generating, setGenerating] = useState(false)
+
+  const load = useCallback(() => {
     api
       .get<Strategy[]>('/api/v1/strategies?marketType=FUTURES')
       .then((list) => {
@@ -113,12 +150,45 @@ export default function FuturesStrategies() {
         setSelected((prev) => (prev ? list.find((s) => s.id === prev.id) ?? prev : prev))
       })
       .catch(() => setStrategies([]))
+  }, [])
 
   useEffect(() => {
     load()
     const poll = setInterval(load, 10_000)
     return () => clearInterval(poll)
-  }, [])
+  }, [load])
+
+  async function handleGenerate(e: React.FormEvent) {
+    e.preventDefault()
+    setGenerating(true)
+    try {
+      const created = await api.post<Strategy>('/api/v1/strategies/generate', {
+        pairs: [genPair.trim().toUpperCase()],
+        style: genStyle,
+        timeframe: genTf,
+        riskProfile: genRisk,
+        name: genName.trim() || undefined,
+      })
+      setGenOpen(false)
+      setGenName('')
+      await load()
+      setSelectedCoin(created.instrument ?? genPair.trim().toUpperCase())
+      setSelected(created)
+      pushToast({
+        title: `Strategy generated: ${created.name}`,
+        detail: `${created.instrument} · ${created.config?.timeframe ?? genTf} · Paper bot launched`,
+        tone: 'success',
+      })
+    } catch (err) {
+      pushToast({
+        title: 'Strategy generation failed',
+        detail: err instanceof Error ? err.message : 'Unable to generate strategy',
+        tone: 'error',
+      })
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   const coins = strategies ? groupByCoin(strategies) : null
   const coinStrategies =
@@ -126,56 +196,162 @@ export default function FuturesStrategies() {
 
   return (
     <PageShell>
-      <PageTitle
-        title="Futures Strategies"
-        subtitle="Pick a coin, then inspect the AI strategies generated for it"
-      />
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <PageTitle
+          title="Futures Strategies"
+          subtitle="Regime-gated quantitative strategies with automated backtesting and paper-to-LIVE promotion"
+        />
+        <Button
+          variant={genOpen ? 'ghost' : 'primary'}
+          onClick={() => setGenOpen((v) => !v)}
+          className="w-full sm:w-auto"
+        >
+          <IconSpark className="h-4 w-4" />
+          {genOpen ? 'Close generator' : 'Generate strategy'}
+        </Button>
+      </div>
+
+      <AnimatePresence>
+        {genOpen && (
+          <motion.form
+            onSubmit={handleGenerate}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+            className="glass mb-6 rounded-2xl p-5"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="font-[family-name:var(--font-display)] text-base font-semibold text-slate-100">
+                  Synthesize Quantitative Futures Strategy
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Includes ADX regime filter, ATR chop guard, volume confirmation, and ≥1.8× reward:risk
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div>
+                <Label>Pair</Label>
+                <select
+                  value={genPair}
+                  onChange={(e) => setGenPair(e.target.value)}
+                  className="w-full rounded-xl border border-edge bg-surface px-3.5 py-2.5 text-sm text-slate-200 outline-none focus:border-amber-500/60"
+                >
+                  {POPULAR_PAIRS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Quantitative Style</Label>
+                <select
+                  value={genStyle}
+                  onChange={(e) => setGenStyle(e.target.value)}
+                  className="w-full rounded-xl border border-edge bg-surface px-3.5 py-2.5 text-sm text-slate-200 outline-none focus:border-amber-500/60"
+                >
+                  {['trend-following', 'keltner-squeeze', 'mean-reversion', 'donchian-adx'].map((k) => (
+                    <option key={k} value={k}>
+                      {STYLE_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Timeframe</Label>
+                <select
+                  value={genTf}
+                  onChange={(e) => setGenTf(e.target.value)}
+                  className="w-full rounded-xl border border-edge bg-surface px-3.5 py-2.5 text-sm text-slate-200 outline-none focus:border-amber-500/60"
+                >
+                  <option value="1m">1m (Scalp)</option>
+                  <option value="5m">5m (Intraday)</option>
+                  <option value="15m">15m (Swing)</option>
+                  <option value="1h">1h (Macro)</option>
+                </select>
+              </div>
+              <div>
+                <Label>Risk Profile</Label>
+                <select
+                  value={genRisk}
+                  onChange={(e) => setGenRisk(e.target.value)}
+                  className="w-full rounded-xl border border-edge bg-surface px-3.5 py-2.5 text-sm text-slate-200 outline-none focus:border-amber-500/60"
+                >
+                  <option value="conservative">Conservative (-1.2% SL / 2.2% TP)</option>
+                  <option value="balanced">Balanced (-1.5% SL / 2.8% TP)</option>
+                  <option value="aggressive">Aggressive (-1.8% SL / 3.4% TP)</option>
+                </select>
+              </div>
+              <div>
+                <Label>Custom Name (optional)</Label>
+                <Input
+                  value={genName}
+                  onChange={(e) => setGenName(e.target.value)}
+                  placeholder="Auto-named if blank"
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setGenOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={generating}>
+                {generating ? 'Synthesizing & Backtesting…' : 'Generate & Run Backtest'}
+              </Button>
+            </div>
+          </motion.form>
+        )}
+      </AnimatePresence>
 
       <Callout tone="info">
-        Strategies are generated automatically per coin. Backtest is a smoke screen into paper.
-        LIVE when paper hits ≥60% win rate over 100 closed trades (plus a
-        quality backtest). Rejected/archived strategies are removed automatically.
+        Promotion gate: strategy advances from paper to LIVE after ≥60% win rate across 100 closed paper trades and a passing historical backtest.
       </Callout>
 
       {!selectedCoin ? (
         <div>
-          <p className="mb-3 text-xs uppercase tracking-widest text-slate-500">Coins with strategies</p>
+          <p className="mb-3 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-500">
+            Coins with active strategies
+          </p>
           {coins === null ? (
             <Spinner />
           ) : coins.length === 0 ? (
-            <Empty message="Waiting for the auto scheduler to generate the first futures strategies…" />
+            <Empty message="No futures strategies yet. Click Generate strategy above to synthesize one." />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {coins.map((c, i) => (
                 <motion.button
                   key={c.instrument}
                   type="button"
-                  initial={{ opacity: 0, y: 14, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  whileHover={{ y: -3, scale: 1.01 }}
-                  whileTap={{ scale: 0.99 }}
-                  transition={{ delay: Math.min(i * 0.03, 0.3), duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  whileHover={{ y: -2 }}
+                  transition={{ delay: Math.min(i * 0.03, 0.2), duration: 0.22 }}
                   onClick={() => {
                     setSelectedCoin(c.instrument)
                     setSelected(c.strategies[0] ?? null)
                   }}
-                  className="glass glass-hover rounded-2xl p-4 text-left"
+                  className="glass glass-hover cursor-pointer rounded-2xl p-4 text-left"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
+                    <span className="font-[family-name:var(--font-display)] text-lg font-bold text-slate-100">
                       {shortCoin(c.instrument)}
                     </span>
                     <Badge tone={STATUS_TONE[c.bestStatus] ?? 'warn'}>
                       {c.bestStatus.replace('_', ' ')}
                     </Badge>
                   </div>
-                  <div className="mt-1 text-xs text-slate-500">{c.instrument}</div>
-                  <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-                    <span>
+                  <div className="mt-0.5 font-mono-num text-xs text-slate-500">{c.instrument}</div>
+                  <div className="mt-4 flex items-center justify-between border-t border-edge/70 pt-3 text-xs text-slate-400">
+                    <span className="font-mono-num">
                       {c.strategies.length} strateg{c.strategies.length === 1 ? 'y' : 'ies'}
                       {c.openPositions > 0 ? ` · ${c.openPositions} open` : ''}
                     </span>
-                    <span className="text-cyan-400/80">Open →</span>
+                    <span className="inline-flex items-center gap-1 font-medium text-amber-400">
+                      Inspect <IconChevronRight className="h-3.5 w-3.5" />
+                    </span>
                   </div>
                 </motion.button>
               ))}
@@ -196,7 +372,7 @@ export default function FuturesStrategies() {
             </Button>
             <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold text-slate-100">
               {shortCoin(selectedCoin)}
-              <span className="ml-2 text-sm font-normal text-slate-500">{selectedCoin}</span>
+              <span className="ml-2 font-mono-num text-sm font-normal text-slate-500">{selectedCoin}</span>
             </h2>
           </div>
 
@@ -205,43 +381,38 @@ export default function FuturesStrategies() {
               {coinStrategies.length === 0 ? (
                 <Empty message="No strategies for this coin yet." />
               ) : (
-                coinStrategies.map((s, i) => (
-                  <motion.button
+                coinStrategies.map((s) => (
+                  <button
                     key={s.id}
                     type="button"
-                    initial={{ opacity: 0, y: 14 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: Math.min(i * 0.04, 0.35) }}
                     onClick={() => setSelected(s)}
-                    whileHover={{ x: 2 }}
-                    className={`glass glass-hover w-full rounded-2xl p-4 text-left ${selected?.id === s.id ? 'border-cyan-500/60 ring-1 ring-cyan-500/30' : ''}`}
+                    className={`glass glass-hover w-full cursor-pointer rounded-2xl p-4 text-left ${
+                      selected?.id === s.id ? 'border-amber-500/60 bg-[#171923]' : ''
+                    }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate font-medium text-slate-100">{s.name}</span>
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="font-medium leading-snug text-slate-100">{s.name}</span>
                       <Badge tone={STATUS_TONE[s.status] ?? 'warn'}>{s.status.replace('_', ' ')}</Badge>
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-                      <span>{s.marginCurrency ?? 'INR'}</span>
-                      <span>·</span>
-                      <span>{s.config?.timeframe ?? '1h'}</span>
-                      <span>·</span>
-                      <span className={(s.paper?.openPositions ?? 0) > 0 ? 'text-cyan-300' : ''}>
+                    <div className="mt-1.5 font-mono-num text-xs text-slate-400">
+                      {s.marginCurrency ?? 'INR'} · {s.config?.timeframe ?? '5m'} ·{' '}
+                      <span className={(s.paper?.openPositions ?? 0) > 0 ? 'text-amber-300' : 'text-slate-500'}>
                         {s.paper?.openPositions ?? 0} open
                       </span>
                     </div>
                     {(s.status === 'PAPER_TRADING' || s.status === 'LIVE_APPROVED') && (
                       <PaperBar paper={s.paper} compact />
                     )}
-                  </motion.button>
+                  </button>
                 ))
               )}
             </div>
 
             <div className="min-w-0 lg:col-span-2">
               {selected ? (
-                <StrategyDetail strategy={selected} />
+                <StrategyDetail key={selected.id} strategy={selected} onUpdated={load} />
               ) : (
-                <Card>
+                <Card hover={false}>
                   <Empty message="Select a strategy to inspect its pipeline and backtest." />
                 </Card>
               )}
@@ -257,36 +428,39 @@ function PipelineStepper({ status, reason }: { status: string; reason?: string }
   if (status === 'REJECTED') {
     return (
       <p className="text-sm text-rose-400">
-        Rejected — {reason || 'failed validation or backtest smoke gate (too few trades / high drawdown). New strategies will regenerate for this coin.'}
+        Rejected — {reason || 'failed validation or backtest smoke gate.'}
       </p>
     )
   }
   if (status === 'ARCHIVED') {
     return (
       <p className="text-sm text-slate-400">
-        Archived — retired (failed backtest quality gate, unpromotable paper, delisted, or superseded).
+        Archived — retired or superseded.
       </p>
     )
   }
   const current = PIPELINE_STEPS.indexOf(status)
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {PIPELINE_STEPS.map((step, i) => (
-        <div key={step} className="flex items-center gap-1.5">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {PIPELINE_STEPS.map((step, i) => {
+        const done = i < current
+        const active = i === current
+        return (
           <div
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium ${
-              i < current
-                ? 'bg-emerald-500/15 text-emerald-300'
-                : i === current
-                  ? 'bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-500/40'
-                  : 'bg-surface/80 text-slate-600'
+            key={step}
+            className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 font-mono-num text-[11px] font-medium ${
+              done
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                : active
+                  ? 'border-amber-500/45 bg-amber-500/15 text-amber-200'
+                  : 'border-edge bg-surface/60 text-slate-500'
             }`}
           >
-            {i < current ? '✓' : i === current ? '●' : '○'} {step.replace('_', ' ')}
+            <span className="shrink-0">{done ? '✓' : active ? '●' : '○'}</span>
+            <span className="truncate">{step.replace('_', ' ')}</span>
           </div>
-          {i < PIPELINE_STEPS.length - 1 && <span className="text-slate-700">→</span>}
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
@@ -303,21 +477,21 @@ function PaperBar({ paper, compact }: { paper: PaperProgress; compact?: boolean 
   const winPct = Math.round(paper.winRate * 100)
   const needPct = Math.round(paper.requiredWinRate * 100)
   return (
-    <div className={compact ? 'mt-2' : 'mt-1'}>
-      <div className="flex items-center justify-between text-[11px] text-slate-500">
+    <div className={compact ? 'mt-2.5' : 'mt-1'}>
+      <div className="flex items-center justify-between font-mono-num text-[11px] text-slate-400">
         <span>
-          Paper: {paper.closedTrades}/{paper.requiredTrades} trades
+          Paper {paper.closedTrades}/{paper.requiredTrades}
         </span>
-        <span className={paper.winRate >= paper.requiredWinRate ? 'text-emerald-400' : ''}>
-          {winPct}% wins (need {needPct}%)
+        <span className={paper.winRate >= paper.requiredWinRate ? 'text-emerald-400' : 'text-slate-400'}>
+          {winPct}% WR (need {needPct}%)
         </span>
       </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-900">
         <motion.div
-          className={`h-full rounded-full ${paper.winRate >= paper.requiredWinRate ? 'bg-emerald-400' : 'bg-cyan-400'}`}
+          className={`h-full rounded-full ${paper.winRate >= paper.requiredWinRate ? 'bg-emerald-400' : 'bg-amber-400'}`}
           initial={{ width: 0 }}
           animate={{ width: `${tradePct}%` }}
-          transition={{ duration: 0.6 }}
+          transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
         />
       </div>
     </div>
@@ -358,8 +532,11 @@ interface LiveSkip {
   createdAt: string
 }
 
-function StrategyDetail({ strategy }: { strategy: Strategy }) {
-  const [tab, setTab] = useState<'backtest' | 'paper' | 'orders' | 'code'>('paper')
+function StrategyDetail({ strategy, onUpdated }: { strategy: Strategy; onUpdated: () => void }) {
+  const { pushToast } = useToast()
+  const [tab, setTab] = useState<'backtest' | 'paper' | 'orders' | 'code'>(() =>
+    strategy.status === 'GENERATED' || strategy.status === 'BACKTESTED' ? 'backtest' : 'paper',
+  )
   const [detail, setDetail] = useState<Strategy>(strategy)
   const [backtests, setBacktests] = useState<Backtest[]>([])
   const [active, setActive] = useState<Backtest | null>(null)
@@ -368,36 +545,61 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
   const [orders, setOrders] = useState<StrategyOrder[]>([])
   const [skips, setSkips] = useState<LiveSkip[]>([])
   const [approveBusy, setApproveBusy] = useState(false)
-  const [approveErr, setApproveErr] = useState('')
+  const [backtestBusy, setBacktestBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
   const activeRef = useRef<Backtest | null>(null)
+  const primaryPair = strategy.instrument ?? strategy.config?.pairs?.[0] ?? ''
 
-  const loadBacktests = () =>
-    api.get<Backtest[]>(`/api/v1/backtests?strategyId=${strategy.id}`).then((list) => {
-      setBacktests(list)
-      const done = list.find((b) => b.status === 'DONE')
-      if (done && !activeRef.current) selectBacktest(done)
-    }).catch(() => setBacktests([]))
+  const selectBacktest = useCallback(
+    async (bt: Backtest) => {
+      activeRef.current = bt
+      setActive(bt)
+      try {
+        if (!primaryPair) {
+          setCandles([])
+          return
+        }
+        const data = await api.get<Candle[]>(
+          `/api/v1/market/candles?pair=${encodeURIComponent(primaryPair)}&timeframe=${bt.timeframe}&from=${bt.rangeStart}&to=${bt.rangeEnd}&marketType=FUTURES`,
+        )
+        setCandles(data)
+      } catch {
+        setCandles([])
+      }
+    },
+    [primaryPair],
+  )
 
-  const loadHistory = () => {
-    api.get<StrategyTrade[]>(`/api/v1/strategies/${strategy.id}/trades?mode=PAPER`)
+  const loadBacktests = useCallback(() => {
+    api
+      .get<Backtest[]>(`/api/v1/backtests?strategyId=${strategy.id}`)
+      .then((list) => {
+        setBacktests(list)
+        const done = list.find((b) => b.status === 'DONE')
+        if (done && !activeRef.current) void selectBacktest(done)
+      })
+      .catch(() => setBacktests([]))
+  }, [strategy.id, selectBacktest])
+
+  const loadHistory = useCallback(() => {
+    api
+      .get<StrategyTrade[]>(`/api/v1/strategies/${strategy.id}/trades?mode=PAPER`)
       .then(setTrades)
       .catch(() => setTrades([]))
-    api.get<StrategyOrder[]>(`/api/v1/strategies/${strategy.id}/orders`)
+    api
+      .get<StrategyOrder[]>(`/api/v1/strategies/${strategy.id}/orders`)
       .then(setOrders)
       .catch(() => setOrders([]))
-    api.get<LiveSkip[]>(`/api/v1/strategies/${strategy.id}/live-skips`)
+    api
+      .get<LiveSkip[]>(`/api/v1/strategies/${strategy.id}/live-skips`)
       .then(setSkips)
       .catch(() => setSkips([]))
-  }
+  }, [strategy.id])
 
   useEffect(() => {
     activeRef.current = null
-    setActive(null)
-    setCandles([])
-    setDetail(strategy)
-    setTab(strategy.status === 'GENERATED' || strategy.status === 'BACKTESTED' ? 'backtest' : 'paper')
-    // List payload omits sourceCode for speed — load full row for the code tab.
-    api.get<Strategy>(`/api/v1/strategies/${strategy.id}`)
+    api
+      .get<Strategy>(`/api/v1/strategies/${strategy.id}`)
       .then(setDetail)
       .catch(() => setDetail(strategy))
     loadBacktests()
@@ -405,41 +607,71 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
     const poll = setInterval(() => {
       loadBacktests()
       loadHistory()
-    }, 8_000)
+    }, 10_000)
     return () => clearInterval(poll)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategy.id])
-
-  async function selectBacktest(bt: Backtest) {
-    activeRef.current = bt
-    setActive(bt)
-    try {
-      const pair = strategy.instrument ?? strategy.config?.pairs?.[0] ?? ''
-      if (!pair) {
-        setCandles([])
-        return
-      }
-      const data = await api.get<Candle[]>(
-        `/api/v1/market/candles?pair=${encodeURIComponent(pair)}&timeframe=${bt.timeframe}&from=${bt.rangeStart}&to=${bt.rangeEnd}&marketType=FUTURES`,
-      )
-      setCandles(data)
-    } catch {
-      setCandles([])
-    }
-  }
+  }, [strategy, loadBacktests, loadHistory])
 
   async function approveLive() {
     setApproveBusy(true)
-    setApproveErr('')
     try {
       await api.post(`/api/v1/strategies/${strategy.id}/approve-live`)
       const updated = await api.get<Strategy>(`/api/v1/strategies/${strategy.id}`)
       setDetail(updated)
       loadHistory()
+      onUpdated()
+      pushToast({
+        title: `${strategy.name} approved for LIVE`,
+        detail: 'Paper gate passed and strategy promoted to LIVE execution.',
+        tone: 'success',
+      })
     } catch (e) {
-      setApproveErr(e instanceof Error ? e.message : 'Approve failed')
+      pushToast({
+        title: 'LIVE approval blocked',
+        detail: e instanceof Error ? e.message : 'Approve failed',
+        tone: 'error',
+      })
     } finally {
       setApproveBusy(false)
+    }
+  }
+
+  async function runBacktest() {
+    setBacktestBusy(true)
+    try {
+      const bt = await api.post<Backtest>(`/api/v1/strategies/${strategy.id}/backtest`, {
+        timeframe: detail.config?.timeframe ?? '5m',
+        days: 5,
+      })
+      await loadBacktests()
+      await selectBacktest(bt)
+      setTab('backtest')
+      onUpdated()
+      const m = bt.metrics as Record<string, number> | undefined
+      pushToast({
+        title: `Backtest complete (${bt.timeframe})`,
+        detail: m ? `+${m.profit_total_pct}% · ${Math.round((m.win_rate ?? 0) * 100)}% WR · PF ${m.profit_factor}` : undefined,
+        tone: 'success',
+      })
+    } catch (e) {
+      pushToast({
+        title: 'Backtest failed',
+        detail: e instanceof Error ? e.message : 'Unable to run backtest',
+        tone: 'error',
+      })
+    } finally {
+      setBacktestBusy(false)
+    }
+  }
+
+  async function copyCode() {
+    if (!detail.sourceCode) return
+    try {
+      await navigator.clipboard.writeText(detail.sourceCode)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1800)
+      pushToast({ title: 'Strategy code copied', tone: 'info' })
+    } catch {
+      pushToast({ title: 'Copy failed', tone: 'error' })
     }
   }
 
@@ -447,131 +679,176 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
     { time: t.entry_time, type: 'entry' as const },
     { time: t.exit_time, type: 'exit' as const, text: `${(t.profit_ratio * 100).toFixed(1)}%` },
   ])
+  const btCurve = useMemo(() => {
+    const list = active?.trades ?? []
+    if (list.length === 0) return []
+    const pts = [0]
+    let cum = 0
+    for (const t of list) {
+      cum += Number(t.profit_ratio || 0) * 100
+      pts.push(Number(cum.toFixed(2)))
+    }
+    return pts
+  }, [active])
   const metrics = active?.metrics as Record<string, number | string> | undefined
 
   return (
-    <Card>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-[family-name:var(--font-display)] text-xl font-semibold text-slate-100">
-            {strategy.instrument ?? strategy.name}
+    <Card hover={false}>
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h2 className="truncate font-[family-name:var(--font-display)] text-xl font-bold text-slate-100">
+            {detail.name}
           </h2>
-          <div className="mt-1 text-xs text-slate-500">
-            {strategy.config?.provider_used && (
-              <span>
-                ✦ {strategy.config.provider_used} / {strategy.config.model_used} ·{' '}
-              </span>
-            )}
-            {strategy.config?.timeframe ?? '1h'} · {strategy.marginCurrency ?? 'INR'}
+          <div className="mt-1 font-mono-num text-xs text-slate-400">
+            {detail.instrument ?? '—'} · {detail.config?.timeframe ?? '5m'} · {detail.marginCurrency ?? 'INR'}
+            {detail.config?.provider_used ? ` · ${detail.config.provider_used}/${detail.config.model_used}` : ''}
           </div>
+          {detail.config?.stoploss != null && (
+            <div className="mt-1 font-mono-num text-[11px] text-slate-500">
+              SL {(Number(detail.config.stoploss) * 100).toFixed(1)}% · Target ROI{' '}
+              {detail.config.minimal_roi?.['0'] != null
+                ? `+${(Number(detail.config.minimal_roi['0']) * 100).toFixed(1)}%`
+                : '—'}
+              {detail.config.style ? ` · ${STYLE_LABELS[detail.config.style] ?? detail.config.style}` : ''}
+            </div>
+          )}
         </div>
-        <div className="flex flex-wrap gap-2">
-          {(strategy.instrument || strategy.config?.pairs?.[0]) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="subtle" onClick={runBacktest} disabled={backtestBusy} className="px-3 py-1.5 text-xs">
+            <IconPlay className="h-3.5 w-3.5" />
+            {backtestBusy ? 'Backtesting…' : 'Run backtest'}
+          </Button>
+          {(detail.instrument || detail.config?.pairs?.[0]) && (
             <Link
-              to={`/futures/chart/${encodeURIComponent(strategy.instrument ?? strategy.config!.pairs![0])}?mode=strategy&strategyId=${strategy.id}&timeframe=5m`}
+              to={`/futures/chart/${encodeURIComponent(detail.instrument ?? detail.config!.pairs![0])}?mode=strategy&strategyId=${detail.id}&timeframe=${detail.config?.timeframe ?? '5m'}`}
             >
-              <Button variant="ghost">Open chart</Button>
+              <Button variant="ghost" className="px-3 py-1.5 text-xs">
+                Open chart
+              </Button>
             </Link>
           )}
-          {(['paper', 'orders', 'backtest', 'code'] as const).map((t) => (
-            <Button key={t} variant={tab === t ? 'primary' : 'ghost'} onClick={() => setTab(t)}>
-              {t === 'paper' ? 'Paper trades' : t === 'orders' ? 'Orders' : t === 'backtest' ? 'Backtest' : 'Code'}
-            </Button>
-          ))}
         </div>
       </div>
 
       <div className="mb-4">
         <PipelineStepper
-          status={strategy.status}
+          status={detail.status}
           reason={
-            strategy.config?.generation_errors
-              ? Array.isArray(strategy.config.generation_errors)
-                ? strategy.config.generation_errors.join('; ')
-                : String(strategy.config.generation_errors)
+            detail.config?.generation_errors
+              ? Array.isArray(detail.config.generation_errors)
+                ? detail.config.generation_errors.join('; ')
+                : String(detail.config.generation_errors)
               : undefined
           }
         />
       </div>
 
       {(detail.status === 'PAPER_TRADING' || detail.status === 'LIVE_APPROVED') && (
-        <div className="mb-4 rounded-xl border border-edge/60 bg-surface/50 px-4 py-3">
-          <div className="mb-1 text-xs font-medium uppercase tracking-widest text-slate-500">
+        <div className="mb-4 rounded-xl border border-edge bg-surface/60 px-4 py-3">
+          <div className="mb-1.5 text-[11px] font-medium uppercase tracking-widest text-slate-400">
             {detail.status === 'LIVE_APPROVED'
-              ? 'Live gate passed — paper history below'
-              : `Paper gate: need ≥${Math.round((detail.paper?.requiredWinRate ?? 0.6) * 100)}% win rate over ${detail.paper?.requiredTrades ?? 100} closed trades — below that WR is auto-rejected`}
+              ? 'LIVE Gate Passed'
+              : `Paper Gate: ≥${Math.round((detail.paper?.requiredWinRate ?? 0.6) * 100)}% WR over ${detail.paper?.requiredTrades ?? 100} closed trades`}
           </div>
           <PaperBar paper={detail.paper ?? strategy.paper} />
-          <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-400">
-            <span>
-              Open:{' '}
-              <span className="text-cyan-300">{detail.paper?.openPositions ?? 0}</span>
-            </span>
-            <span>
-              Wins: <span className="text-emerald-400">{detail.paper?.wins ?? 0}</span>
-            </span>
-            <span>
-              Paper PnL:{' '}
-              <span className={(detail.paper?.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                ₹{Number(detail.paper?.totalPnl ?? 0).toFixed(2)}
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 font-mono-num text-xs text-slate-400">
+            <div className="flex flex-wrap gap-4">
+              <span>
+                Open <strong className="text-amber-300">{detail.paper?.openPositions ?? 0}</strong>
               </span>
-            </span>
-          </div>
-          {detail.status === 'PAPER_TRADING' && (
-            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span>
+                Wins <strong className="text-emerald-400">{detail.paper?.wins ?? 0}</strong>
+              </span>
+              <span>
+                Paper PnL{' '}
+                <strong className={(detail.paper?.totalPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                  ₹{Number(detail.paper?.totalPnl ?? 0).toFixed(2)}
+                </strong>
+              </span>
+            </div>
+            {detail.status === 'PAPER_TRADING' && (
               <Button
                 onClick={approveLive}
                 disabled={approveBusy || !paperGateLikelyMet(detail.paper)}
-                title={
-                  paperGateLikelyMet(detail.paper)
-                    ? 'Promote using existing paper + backtest gates'
-                    : 'Paper gate not met yet'
-                }
+                className="px-3 py-1.5 text-xs"
               >
                 {approveBusy ? 'Approving…' : 'Approve for LIVE'}
               </Button>
-              {!paperGateLikelyMet(detail.paper) && (
-                <span className="text-xs text-slate-500">
-                  Enabled only when paper trades + ≥60% WR gate already pass (same as auto).
-                </span>
-              )}
-              {approveErr && <span className="text-xs text-rose-400">{approveErr}</span>}
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
 
       {skips.length > 0 && (
-        <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/5 px-4 py-3">
-          <div className="mb-2 text-xs font-medium uppercase tracking-widest text-rose-300/90">
-            LIVE skip reasons
+        <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/[0.04] px-4 py-3">
+          <div className="mb-2 text-[11px] font-medium uppercase tracking-widest text-rose-300">
+            LIVE Gate Log
           </div>
-          <ul className="space-y-1.5 text-xs text-slate-400">
-            {skips.slice(0, 8).map((s, i) => (
-              <li key={`${s.action}-${s.createdAt}-${i}`}>
+          <ul className="space-y-1 text-xs text-slate-400">
+            {skips.slice(0, 6).map((s, i) => (
+              <li key={`${s.action}-${s.createdAt}-${i}`} className="font-mono-num">
                 <span className="text-rose-300">{s.action.replace('AUTO_LIVE_SKIPPED_', '')}</span>
                 {s.details?.reason ? ` — ${s.details.reason}` : ''}
-                {s.details?.backtestProfit != null
-                  ? ` · bt profit ${s.details.backtestProfit}% WR ${Number(s.details.backtestWinRate ?? 0) * 100}%`
-                  : ''}
-                {s.details?.available != null ? ` (INR avail ${s.details.available})` : ''}
-                <span className="ml-2 text-slate-600">{formatDateTime(s.createdAt)}</span>
+                <span className="ml-2 text-slate-500">{formatDateTime(s.createdAt)}</span>
               </li>
             ))}
           </ul>
         </div>
       )}
 
+      <div className="mb-4 inline-flex flex-wrap gap-1 rounded-xl border border-edge bg-surface/80 p-1">
+        {(['paper', 'orders', 'backtest', 'code'] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTab(t)}
+            className={`relative cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              tab === t ? 'text-amber-200' : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {tab === t && (
+              <motion.span
+                layoutId="strategy-detail-tabs"
+                className="absolute inset-0 rounded-lg border border-amber-500/35 bg-amber-500/15"
+                transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              />
+            )}
+            <span className="relative z-10">
+              {t === 'paper'
+                ? 'Paper trades'
+                : t === 'orders'
+                  ? 'Orders'
+                  : t === 'backtest'
+                    ? 'Backtest'
+                    : 'Source code'}
+            </span>
+          </button>
+        ))}
+      </div>
+
       {tab === 'code' && (
-        <pre className="max-h-[480px] overflow-auto rounded-xl border border-edge bg-black/40 p-4 text-xs leading-relaxed text-emerald-200/90">
-          {detail.sourceCode || 'Loading source…'}
-        </pre>
+        <div className="overflow-hidden rounded-xl border border-edge bg-[#06070b]">
+          <div className="flex items-center justify-between border-b border-edge px-3.5 py-2">
+            <span className="font-mono-num text-[11px] text-slate-400">strategy.py</span>
+            <button
+              type="button"
+              onClick={copyCode}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-edge px-2.5 py-1 text-[11px] text-slate-300 transition-colors hover:border-amber-500/40 hover:text-amber-200"
+            >
+              {copied ? <IconCheck className="h-3.5 w-3.5 text-emerald-400" /> : <IconCopy className="h-3.5 w-3.5" />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="max-h-[460px] overflow-auto p-4 font-[family-name:var(--font-mono)] text-xs leading-relaxed text-emerald-200/90">
+            {detail.sourceCode || 'Loading source…'}
+          </pre>
+        </div>
       )}
 
       {tab === 'paper' && (
         <div>
           <p className="mb-3 text-xs text-slate-500">
-            PAPER fills at live CoinDCX futures price (not invented). Labeled PAPER — never shown as account money on Dashboard.
+            PAPER fills track live CoinDCX futures pricing without committing account equity.
           </p>
           {trades.length === 0 ? (
             <Empty message="No paper trades recorded yet for this strategy." />
@@ -593,37 +870,35 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
                   />
                 ))}
               </div>
-              <div className="hidden overflow-x-auto rounded-xl border border-edge/60 md:block">
-                <table className="w-full min-w-[860px] text-left text-sm">
+              <div className="hidden overflow-x-auto rounded-xl border border-edge md:block">
+                <table className="w-full min-w-[780px] text-left text-sm">
                   <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
                     <tr>
-                      <th className="px-3 py-2">Mode</th>
-                      <th className="px-3 py-2">Pair</th>
-                      <th className="px-3 py-2">Side</th>
-                      <th className="px-3 py-2">Qty</th>
-                      <th className="px-3 py-2">Entry</th>
-                      <th className="px-3 py-2">Exit</th>
-                      <th className="px-3 py-2">Status</th>
-                      <th className="px-3 py-2">PnL</th>
-                      <th className="px-3 py-2">Opened</th>
-                      <th className="px-3 py-2">Closed</th>
+                      <th className="px-3 py-2.5">Mode</th>
+                      <th className="px-3 py-2.5">Pair</th>
+                      <th className="px-3 py-2.5">Side</th>
+                      <th className="px-3 py-2.5">Qty</th>
+                      <th className="px-3 py-2.5">Entry</th>
+                      <th className="px-3 py-2.5">Exit</th>
+                      <th className="px-3 py-2.5">Status</th>
+                      <th className="px-3 py-2.5">PnL</th>
+                      <th className="px-3 py-2.5">Opened</th>
                     </tr>
                   </thead>
                   <tbody>
                     {trades.map((t) => (
-                      <tr key={t.id} className="border-t border-edge/40 text-slate-300">
-                        <td className="px-3 py-2"><Badge tone={t.mode === 'LIVE' ? 'success' : 'info'}>{t.mode}</Badge></td>
-                        <td className="px-3 py-2">{t.pair}</td>
-                        <td className="px-3 py-2">{t.side}</td>
-                        <td className="px-3 py-2">{Number(t.quantity)}</td>
-                        <td className="px-3 py-2">₹{Number(t.entryPrice).toLocaleString()}</td>
-                        <td className="px-3 py-2">{t.exitPrice != null ? `₹${Number(t.exitPrice).toLocaleString()}` : '—'}</td>
-                        <td className="px-3 py-2"><Badge tone={t.status === 'OPEN' ? 'warn' : 'default'}>{t.status}</Badge></td>
-                        <td className={`px-3 py-2 ${Number(t.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <tr key={t.id} className="data-row border-t border-edge/50 text-slate-300">
+                        <td className="px-3 py-2.5"><Badge tone={t.mode === 'LIVE' ? 'success' : 'info'}>{t.mode}</Badge></td>
+                        <td className="px-3 py-2.5 font-medium text-slate-100">{t.pair}</td>
+                        <td className="px-3 py-2.5 font-mono-num">{t.side}</td>
+                        <td className="px-3 py-2.5 font-mono-num">{Number(t.quantity)}</td>
+                        <td className="px-3 py-2.5 font-mono-num">₹{Number(t.entryPrice).toLocaleString()}</td>
+                        <td className="px-3 py-2.5 font-mono-num">{t.exitPrice != null ? `₹${Number(t.exitPrice).toLocaleString()}` : '—'}</td>
+                        <td className="px-3 py-2.5"><Badge tone={t.status === 'OPEN' ? 'warn' : 'default'}>{t.status}</Badge></td>
+                        <td className={`px-3 py-2.5 font-mono-num ${Number(t.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                           {t.realizedPnl != null ? `₹${Number(t.realizedPnl).toFixed(2)}` : '—'}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(t.openedAt)}</td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(t.closedAt)}</td>
+                        <td className="whitespace-nowrap px-3 py-2.5 font-mono-num text-xs text-slate-400">{formatDateTime(t.openedAt)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -636,9 +911,6 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
 
       {tab === 'orders' && (
         <div>
-          <p className="mb-3 text-xs text-slate-500">
-            Order ledger (paper fills + live exchange attempts, including FAILED).
-          </p>
           {orders.length === 0 ? (
             <Empty message="No orders recorded yet for this strategy." />
           ) : (
@@ -657,35 +929,35 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
                   />
                 ))}
               </div>
-              <div className="hidden overflow-x-auto rounded-xl border border-edge/60 md:block">
-                <table className="w-full min-w-[780px] text-left text-sm">
+              <div className="hidden overflow-x-auto rounded-xl border border-edge md:block">
+                <table className="w-full min-w-[700px] text-left text-sm">
                   <thead className="bg-surface/80 text-[11px] uppercase tracking-wider text-slate-500">
                     <tr>
-                      <th className="px-3 py-2">Mode</th>
-                      <th className="px-3 py-2">Side</th>
-                      <th className="px-3 py-2">Qty</th>
-                      <th className="px-3 py-2">Price</th>
-                      <th className="px-3 py-2">Status</th>
-                      <th className="px-3 py-2">Error</th>
-                      <th className="px-3 py-2">Order time</th>
+                      <th className="px-3 py-2.5">Mode</th>
+                      <th className="px-3 py-2.5">Side</th>
+                      <th className="px-3 py-2.5">Qty</th>
+                      <th className="px-3 py-2.5">Price</th>
+                      <th className="px-3 py-2.5">Status</th>
+                      <th className="px-3 py-2.5">Error</th>
+                      <th className="px-3 py-2.5">Order time</th>
                     </tr>
                   </thead>
                   <tbody>
                     {orders.map((o) => (
-                      <tr key={o.id} className="border-t border-edge/40 text-slate-300">
-                        <td className="px-3 py-2"><Badge tone={o.mode === 'LIVE' ? 'success' : 'info'}>{o.mode}</Badge></td>
-                        <td className="px-3 py-2">{o.side}</td>
-                        <td className="px-3 py-2">{Number(o.quantity)}</td>
-                        <td className="px-3 py-2">₹{Number(o.price).toLocaleString()}</td>
-                        <td className="px-3 py-2">
+                      <tr key={o.id} className="data-row border-t border-edge/50 text-slate-300">
+                        <td className="px-3 py-2.5"><Badge tone={o.mode === 'LIVE' ? 'success' : 'info'}>{o.mode}</Badge></td>
+                        <td className="px-3 py-2.5 font-mono-num">{o.side}</td>
+                        <td className="px-3 py-2.5 font-mono-num">{Number(o.quantity)}</td>
+                        <td className="px-3 py-2.5 font-mono-num">₹{Number(o.price).toLocaleString()}</td>
+                        <td className="px-3 py-2.5">
                           <Badge tone={o.status === 'FAILED' ? 'danger' : o.status === 'FILLED' ? 'success' : 'warn'}>
                             {o.status}
                           </Badge>
                         </td>
-                        <td className="max-w-[240px] truncate px-3 py-2 text-xs text-rose-300" title={o.error ?? ''}>
+                        <td className="max-w-[240px] truncate px-3 py-2.5 text-xs text-rose-300" title={o.error ?? ''}>
                           {o.error ?? '—'}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{formatDateTime(o.createdAt)}</td>
+                        <td className="whitespace-nowrap px-3 py-2.5 font-mono-num text-xs text-slate-400">{formatDateTime(o.createdAt)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -698,22 +970,19 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
 
       {tab === 'backtest' && (
         <div>
-          <p className="mb-3 text-xs text-slate-500">
-            Historical simulation only — LIVE requires this gate plus ≥{Math.round(strategy.paper.requiredWinRate * 100)}% paper win rate.
-          </p>
           {backtests.length > 0 && (
             <div className="mb-4 flex flex-wrap items-center gap-3">
               <select
-                className="rounded-xl border border-edge bg-surface px-3 py-2 text-xs text-slate-300"
+                className="rounded-xl border border-edge bg-surface px-3 py-2 font-mono-num text-xs text-slate-300 outline-none focus:border-amber-500/60"
                 value={active?.id ?? ''}
                 onChange={(e) => {
                   const bt = backtests.find((b) => b.id === e.target.value)
-                  if (bt?.status === 'DONE') selectBacktest(bt)
+                  if (bt?.status === 'DONE') void selectBacktest(bt)
                 }}
               >
                 {backtests.map((b) => (
                   <option key={b.id} value={b.id}>
-                    Backtest · {new Date(b.rangeStart).toLocaleDateString()} →{' '}
+                    {b.timeframe} · {new Date(b.rangeStart).toLocaleDateString()} →{' '}
                     {new Date(b.rangeEnd).toLocaleDateString()} · {b.status}
                   </option>
                 ))}
@@ -725,10 +994,23 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
             <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               <Metric label="Profit" value={`${metrics.profit_total_pct ?? 0}%`} good={Number(metrics.profit_total_pct) > 0} />
               <Metric label="Trades" value={String(metrics.trades ?? 0)} />
-              <Metric label="Win rate" value={`${((metrics.win_rate as number) * 100).toFixed(1)}%`} good={(metrics.win_rate as number) >= 0.55} />
-              <Metric label="Max DD" value={`${metrics.max_drawdown_pct ?? 0}%`} good={false} />
-              <Metric label="PF" value={String(metrics.profit_factor ?? '—')} good={Number(metrics.profit_factor) >= 1} />
-              <Metric label="Sharpe" value={String(metrics.sharpe ?? '—')} />
+              <Metric label="Win rate" value={`${((metrics.win_rate as number) * 100).toFixed(1)}%`} good={(metrics.win_rate as number) >= 0.58} />
+              <Metric label="Max DD" value={`${metrics.max_drawdown_pct ?? 0}%`} good={Number(metrics.max_drawdown_pct) <= 8} />
+              <Metric label="PF" value={String(metrics.profit_factor ?? '—')} good={Number(metrics.profit_factor) >= 1.4} />
+              <Metric label="Sharpe" value={String(metrics.sharpe ?? '—')} good={Number(metrics.sharpe) >= 1.4} />
+            </div>
+          )}
+
+          {btCurve.length >= 2 && (
+            <div className="mb-4 rounded-xl border border-edge bg-surface/65 p-3">
+              <div className="mb-1 flex items-center justify-between font-mono-num text-[11px] uppercase tracking-wider text-slate-400">
+                <span>Cumulative Backtest Return</span>
+                <span className={btCurve[btCurve.length - 1] >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                  {btCurve[btCurve.length - 1] >= 0 ? '+' : ''}
+                  {btCurve[btCurve.length - 1].toFixed(2)}%
+                </span>
+              </div>
+              <EquityCurve points={btCurve} height={56} />
             </div>
           )}
 
@@ -745,10 +1027,10 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
 
 function Metric({ label, value, good }: { label: string; value: string; good?: boolean }) {
   return (
-    <div className="rounded-xl border border-edge/60 bg-surface/60 px-3 py-2.5">
+    <div className="rounded-xl border border-edge bg-surface/65 px-3 py-2.5">
       <div className="text-[10px] uppercase tracking-widest text-slate-500">{label}</div>
       <div
-        className={`mt-0.5 text-sm font-semibold ${good === undefined ? 'text-slate-200' : good ? 'text-emerald-400' : 'text-rose-400'}`}
+        className={`mt-1 font-mono-num text-sm font-semibold ${good === undefined ? 'text-slate-100' : good ? 'text-emerald-400' : 'text-rose-400'}`}
       >
         {value}
       </div>

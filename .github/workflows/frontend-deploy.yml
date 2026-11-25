@@ -1,0 +1,104 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "frontend/**"
+      - "docker-compose.gcp.yml"
+      - ".github/workflows/frontend-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vm-frontend
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node & Verify Static Build
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install & Typecheck Frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Static Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantdcx-frontend-dist
+          path: frontend/dist
+
+      - name: Compute Image Details
+        id: image
+        shell: bash
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER}/cryptoalgo-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        if: secrets.GHCR_PAT != '' || github.token != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT || github.token }}
+
+      - name: Build and Push Frontend Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}:latest
+            ${{ steps.image.outputs.image }}:${{ github.sha }}
+
+      - name: Deploy Frontend to VM (when SSH secrets configured)
+        if: secrets.VM_SSH_KEY != '' && secrets.VM_HOST != '' && secrets.VM_USER != ''
+        env:
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT || github.token }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_OWNER: ${{ steps.image.outputs.owner }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$VM_SSH_KEY" > /tmp/aws.pem
+          chmod 600 /tmp/aws.pem
+          ssh -i /tmp/aws.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${VM_USER}@${VM_HOST}" \
+            "GHCR_PAT='${GHCR_PAT}' GHCR_USER='${GHCR_USER}' GHCR_OWNER='${GHCR_OWNER}' IMAGE_TAG='${IMAGE_TAG}' bash -se" << 'REMOTE'
+          set -euo pipefail
+          cd /home/ubuntu/crypto-algo
+          echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          if grep -q "^FRONTEND_TAG=" .env.gcp; then
+            sed -i "s|^FRONTEND_TAG=.*|FRONTEND_TAG=${IMAGE_TAG}|" .env.gcp
+          else
+            echo "FRONTEND_TAG=${IMAGE_TAG}" >> .env.gcp
+          fi
+          docker pull "ghcr.io/${GHCR_OWNER}/cryptoalgo-frontend:${IMAGE_TAG}"
+          docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d --no-build --no-deps frontend
+          docker logout ghcr.io || true
+          REMOTE
+          rm -f /tmp/aws.pem

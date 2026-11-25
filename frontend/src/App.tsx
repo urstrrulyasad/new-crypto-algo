@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { hasSession } from '@/lib/api'
+import ToastProvider from '@/components/Toast'
 import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
 import Dashboard from '@/pages/Dashboard'
@@ -17,30 +18,32 @@ function Protected({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route
-          element={
-            <Protected>
-              <Layout />
-            </Protected>
-          }
-        >
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/futures/strategies" element={<FuturesStrategies />} />
-          <Route path="/futures/paper" element={<FuturesPaper />} />
-          <Route path="/futures/coins" element={<FuturesCoins />} />
-          <Route path="/futures/chart/:pair" element={<ChartWorkspace />} />
-          <Route path="/options/strategies" element={<ComingSoon title="Options Strategies" />} />
-          <Route path="/options/paper" element={<ComingSoon title="Options Paper Trade" />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/admin" element={<Admin />} />
-          <Route path="/strategies" element={<Navigate to="/futures/strategies" replace />} />
-          <Route path="/bots" element={<Navigate to="/futures/paper" replace />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <ToastProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route
+            element={
+              <Protected>
+                <Layout />
+              </Protected>
+            }
+          >
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/futures/strategies" element={<FuturesStrategies />} />
+            <Route path="/futures/paper" element={<FuturesPaper />} />
+            <Route path="/futures/coins" element={<FuturesCoins />} />
+            <Route path="/futures/chart/:pair" element={<ChartWorkspace />} />
+            <Route path="/options/strategies" element={<ComingSoon title="Options Strategies" />} />
+            <Route path="/options/paper" element={<ComingSoon title="Options Paper Trade" />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/admin" element={<Admin />} />
+            <Route path="/strategies" element={<Navigate to="/futures/strategies" replace />} />
+            <Route path="/bots" element={<Navigate to="/futures/paper" replace />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </ToastProvider>
   )
 }
